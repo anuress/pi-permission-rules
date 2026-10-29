@@ -38,6 +38,17 @@ test("command substitution adds inner parts", () => {
   assert.deepEqual(texts("echo $(a $(b))"), ["echo $(…)", "a $(…)", "b"]);
 });
 
+test("parts carry nested subshell and substitution scopes", () => {
+  assert.deepEqual(parse("(cd /x; ls)").parts.map((part) => part.scope), ["/1", "/1"]);
+  assert.deepEqual(parse("echo $(a; b) c; d").parts.map((part) => [part.text, part.scope]), [
+    ["echo $(…) c", ""], ["a", "/1"], ["b", "/1"], ["d", ""],
+  ]);
+  assert.deepEqual(parse("( (a) )").parts.map((part) => part.scope), ["/1/1"]);
+  assert.deepEqual(parse("(a); (b)").parts.map((part) => part.scope), ["/1", "/2"]);
+  assert.deepEqual(parse("echo $(a) $(b)").parts.map((part) => part.scope), ["", "/1", "/2"]);
+  assert.deepEqual(parse("echo `a; b`").parts.map((part) => part.scope), ["", "/1", "/1"]);
+});
+
 test("assignments stripped", () => {
   assert.deepEqual(texts("FOO=1 BAR=2 ./gradlew :app:test"), ["./gradlew :app:test"]);
   assert.deepEqual(parse('FOO=1 BAR="x y" ls').parts[0].assignments, ["FOO=1", "BAR=x y"]);

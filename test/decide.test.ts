@@ -119,12 +119,55 @@ test("dangerous environment assignments are not allowed by read-only or allow co
 test("cd tracking resolves relative redirects and treats unknown/outside directories as outside", () => {
   verdict("bash", "allow", { command: "cd sub && echo x > out" }, env("acceptEdits"));
   verdict("bash", "ask", { command: "cd /etc && echo x > hosts" }, env("acceptEdits"));
+  verdict("bash", "ask", { command: "(cd /etc; echo x > hosts)" }, env("acceptEdits"));
+  verdict("bash", "allow", { command: "(cd /etc); echo x > out" }, env("acceptEdits"));
+  verdict("bash", "ask", { command: "echo $(cd /etc; echo x > hosts)" }, env("acceptEdits"));
+  verdict("bash", "ask", { command: "echo `cd /etc; echo x > hosts`" }, env("acceptEdits"));
+  verdict("bash", "allow", { command: "cd /etc && ls 2>&1" }, env("acceptEdits"));
+  verdict("bash", "ask", { command: "cd /etc && ls 2>& cat" }, env("acceptEdits"));
+  for (const mode of ["default", "acceptEdits", "plan"] as const) {
+    verdict("bash", "allow", { command: "ls 2>&1" }, env(mode));
+  }
   verdict("bash", "ask", { command: "cd && echo x > a" }, env("acceptEdits"));
   verdict("bash", "ask", { command: "cd $HOME && echo x > a" }, env("acceptEdits"));
   verdict("bash", "ask", { command: "echo x > $HOME/a" }, { ...env("acceptEdits"), root: "/" });
+  verdict("bash", "ask", { command: "echo x > ~root/f" }, env("acceptEdits"));
+  verdict("bash", "ask", { command: "cd ~root && echo x > f" }, env("acceptEdits"));
+  verdict("write", "ask", { path: "~root/f" }, env("acceptEdits"));
+  verdict("edit", "ask", { path: "~root/f" }, env("acceptEdits"));
   verdict("bash", "ask", { command: "cd && cd sub && echo x > out" }, env("acceptEdits"));
   verdict("bash", "allow", { command: "echo $(cd /etc); echo x > out" }, env("acceptEdits"));
   verdict("bash", "allow", { command: "(cd /etc); echo x > out" }, env("acceptEdits"));
+});
+
+test("deny reason and toBlock cite the first deny, not an earlier ask", () => {
+  const decision = verdict("bash", "deny", { command: "curl x; rm -rf build" }, env("acceptEdits", {
+    ask: rules("Bash(curl:*)"), deny: rules("Bash(rm:*)"),
+  }));
+  assert.equal(decision.flags[0].label, "curl x");
+  assert.match(decision.reason, /`rm -rf build` is denied \(Bash\(rm:\*\)\)/);
+  assert.equal(toBlock(decision).reason, decision.reason);
+});
+
+test("empty or partless bash calls fail closed", () => {
+  for (const command of [undefined, "", "(", "!", "|", ";", ">"] as const) {
+    const decision = decide(command === undefined ? { tool: "bash" } : { tool: "bash", command }, env("acceptEdits"));
+    assert.equal(decision.verdict, "ask", JSON.stringify({ command, decision }));
+    assert.equal(decision.flags[0]?.rule, "unparsed: empty command", JSON.stringify({ command, decision }));
+    assert.equal(decision.flags[0]?.suggestion, null);
+  }
+
+  const alphabet = ["a", "'", '"', "`", "$", "(", ")", "<", ">", "|", "&", ";", "\\", "\n", " ", "#", "="];
+  for (let i = 0; i < 1000; i++) {
+    let command = "";
+    for (let j = 0, length = Math.floor(Math.random() * 20); j < length; j++) {
+      command += alphabet[Math.floor(Math.random() * alphabet.length)];
+    }
+    const parsed = parse(command);
+    if (parsed.parts.length === 0 && parsed.unsafe === undefined) {
+      assert.notEqual(decide({ tool: "bash", command }, env()).verdict, "allow", command);
+    }
+  }
 });
 
 test("a redirect deny beats session grants and flags only non-allowed parts", () => {
@@ -151,7 +194,7 @@ test("suggestRule follows command-name heuristic and suppresses code runners", (
     assert.equal(suggestRule(parsed.parts[0]), expected, command);
   }
   assert.equal(suggestRule(parse("FOO=1 ls").parts[0]), null);
-  assert.equal(suggestRule(parse("").parts[0] ?? { argv: [], assignments: [], redirects: [], text: "" }), null);
+  assert.equal(suggestRule(parse("").parts[0] ?? { argv: [], assignments: [], redirects: [], text: "", scope: "" }), null);
 });
 
 test("resolveMode follows precedence and ignores invalid environment values with warning", () => {

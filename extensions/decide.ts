@@ -45,10 +45,9 @@ function flag(label: string, rule: string, suggestion: string | null = null): Fl
   return { label, rule, suggestion };
 }
 
-function decision(verdict: Verdict, flags: Flag[] = []): Decision {
-  const first = flags[0];
-  const reason = first && verdict !== "allow"
-    ? `permission: \`${first.label}\` ${verdict === "deny" ? "is denied" : "needs approval"} (${first.rule}). It was not run. Use a read-only alternative, or report that this step needs the orchestrator.`
+function decision(verdict: Verdict, flags: Flag[] = [], reasonFlag = flags[0]): Decision {
+  const reason = reasonFlag && verdict !== "allow"
+    ? `permission: \`${reasonFlag.label}\` ${verdict === "deny" ? "is denied" : "needs approval"} (${reasonFlag.rule}). It was not run. Use a read-only alternative, or report that this step needs the orchestrator.`
     : "";
   return { verdict, flags, reason };
 }
@@ -59,7 +58,8 @@ function choose(evaluations: Evaluation[]): Decision {
     evaluation.verdict === "deny" || (evaluation.verdict === "ask" && worst === "allow")
       ? evaluation.verdict
       : worst, "allow");
-  return decision(verdict, flags);
+  const reasonFlag = evaluations.find((evaluation) => evaluation.verdict === verdict)?.flag ?? flags[0];
+  return decision(verdict, flags, reasonFlag);
 }
 
 function evaluatePath(path: string, family: "Read" | "Edit", env: Env, outside = false): Evaluation {
@@ -106,137 +106,16 @@ function evaluatePart(part: Part, env: Env): Evaluation {
   return { verdict: "ask", flag: flag(part.text, "no allow rule", suggestRule(part)) };
 }
 
-// Split only outer shell command segments. Substitution and subshell contents
-// remain in their owner's segment, so a nested `cd` cannot change our redirect base.
-function topLevelSegments(command: string): string[] {
-  const segments: string[] = [];
-  let start = 0;
-  let quote: "single" | "double" | null = null;
-  let escaped = false;
-  let depth = 0;
-  let heredocs: { delimiter: string; stripTabs: boolean }[] = [];
-
-  const delimiterAt = (index: number): { delimiter: string; end: number; stripTabs: boolean } | undefined => {
-    let cursor = index + 2;
-    let stripTabs = false;
-    if (command[cursor] === "<") return undefined;
-    if (command[cursor] === "-") {
-      stripTabs = true;
-      cursor++;
-    }
-    while (command[cursor] === " " || command[cursor] === "\t") cursor++;
-    const begin = cursor;
-    let word = "";
-    let wordQuote: "'" | '"' | null = null;
-    while (cursor < command.length) {
-      const char = command[cursor];
-      if (wordQuote) {
-        if (char === wordQuote) wordQuote = null;
-        else word += char;
-      } else if (char === "'" || char === '"') wordQuote = char;
-      else if (char === "\\" && cursor + 1 < command.length) word += command[++cursor];
-      else if (/\s|[;&|<>]/.test(char)) break;
-      else word += char;
-      cursor++;
-    }
-    return word && cursor > begin ? { delimiter: word, end: cursor, stripTabs } : undefined;
-  };
-
-  for (let i = 0; i < command.length; i++) {
-    const char = command[i];
-    const next = command[i + 1];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (char === "\\" && quote !== "single") {
-      escaped = true;
-      continue;
-    }
-    if (quote === "single") {
-      if (char === "'") quote = null;
-      continue;
-    }
-    if (quote === "double") {
-      if (char === '"') quote = null;
-      else if (char === "$" && next === "(") depth++;
-      else if (char === ")" && depth > 0) depth--;
-      continue;
-    }
-    if (char === "'" || char === '"') {
-      quote = char === "'" ? "single" : "double";
-      continue;
-    }
-    if (char === "$" && next === "(") {
-      depth++;
-      i++;
-      continue;
-    }
-    if (char === "`" ) {
-      const end = command.indexOf("`", i + 1);
-      if (end >= 0) i = end;
-      continue;
-    }
-    if (char === "<" && next === "<") {
-      const doc = delimiterAt(i);
-      if (doc) {
-        heredocs.push({ delimiter: doc.delimiter, stripTabs: doc.stripTabs });
-        i = doc.end - 1;
-        continue;
-      }
-    }
-    if (char === "(") {
-      depth++;
-      continue;
-    }
-    if (char === ")" && depth > 0) {
-      depth--;
-      continue;
-    }
-    if (char === "\n") {
-      if (depth === 0) {
-        segments.push(command.slice(start, i));
-        start = i + 1;
-      }
-      if (heredocs.length > 0) {
-        i++;
-        for (const heredoc of heredocs) {
-          let found = false;
-          while (i <= command.length) {
-            const end = command.indexOf("\n", i);
-            const line = command.slice(i, end < 0 ? command.length : end);
-            i = end < 0 ? command.length : end + 1;
-            if ((heredoc.stripTabs ? line.replace(/^\t+/, "") : line) === heredoc.delimiter) {
-              found = true;
-              break;
-            }
-            if (end < 0) break;
-          }
-          if (!found) break;
-        }
-        start = i;
-        i--;
-        heredocs = [];
-      }
-      continue;
-    }
-    if (depth === 0 && (char === ";" || char === "|" || char === "&")) {
-      segments.push(command.slice(start, i));
-      if ((char === "&" || char === "|") && next === char) i++;
-      start = i + 1;
-    }
-  }
-  segments.push(command.slice(start));
-  return segments;
-}
-
-function homePath(path: string): string {
-  return path === "~" ? homedir() : path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
+function homePath(path: string): string | null {
+  if (path === "~") return homedir();
+  if (path.startsWith("~/")) return join(homedir(), path.slice(2));
+  return path.startsWith("~") ? null : path;
 }
 
 function redirectPath(target: string, dir: string | null): { path: string; outside: boolean } {
   if (target.includes("$")) return { path: resolve("/", target), outside: true };
   const expanded = homePath(target);
+  if (expanded === null) return { path: resolve("/", target), outside: true };
   if (isAbsolute(expanded)) return { path: physical(expanded), outside: false };
   return dir === null
     ? { path: resolve("/", target), outside: true }
@@ -248,37 +127,41 @@ function cdDirectory(part: Part, dir: string | null): string | null {
   const args = part.argv.slice(1);
   if (args.length !== 1 || args[0] === "-" || args[0].includes("$")) return null;
   const target = homePath(args[0]);
-  if (dir === null && !isAbsolute(target)) return null;
+  if (target === null || (dir === null && !isAbsolute(target))) return null;
   return physical(resolve(dir ?? "/", target));
 }
 
 function evaluateBash(call: Call, env: Env): Decision {
   const command = call.command ?? "";
   const parsed = parse(command);
-  const root = physical(env.root);
-  let dir: string | null = physical(env.cwd);
-  const evaluations: Evaluation[] = [];
-  const segments = topLevelSegments(command);
-  const parsedSegments = segments.map((segment) => parse(segment));
-  const hasUnsafe = parsed.unsafe !== undefined;
-
-  for (const [segmentIndex, segment] of parsedSegments.entries()) {
-    for (const [index, part] of segment.parts.entries()) {
-      const result = evaluatePart(part, env);
-      evaluations.push(result);
-      for (const target of part.redirects) {
-        const targetPath = redirectPath(target, dir);
-        evaluations.push(evaluatePath(targetPath.path, "Edit", { ...env, root, cwd: "/" }, targetPath.outside));
-      }
-      if (index === 0 && !/^\s*(?:\$\(|`|\()/.test(segments[segmentIndex]) && part.argv.length > 0 && basename(part.argv[0]) === "cd") dir = cdDirectory(part, dir);
-    }
+  if (parsed.parts.length === 0 && parsed.unsafe === undefined) {
+    return decision("ask", [flag(command, "unparsed: empty command")]);
   }
 
-  const denied = evaluations.filter((result) => result.verdict === "deny");
-  if (denied.length > 0) return choose(evaluations);
-  if (hasUnsafe) {
+  const dirs = new Map<string, string | null>([["", physical(env.cwd)]]);
+  const dirFor = (scope: string): string | null => {
+    if (dirs.has(scope)) return dirs.get(scope) ?? null;
+    const parentEnd = scope.lastIndexOf("/");
+    const parent = parentEnd < 0 ? "" : scope.slice(0, parentEnd);
+    const inherited = dirFor(parent);
+    dirs.set(scope, inherited);
+    return inherited;
+  };
+  const evaluations: Evaluation[] = [];
+  for (const part of parsed.parts) {
+    const dir = dirFor(part.scope);
+    evaluations.push(evaluatePart(part, env));
+    for (const target of part.redirects) {
+      const targetPath = redirectPath(target, dir);
+      evaluations.push(evaluatePath(targetPath.path, "Edit", { ...env, cwd: "/" }, targetPath.outside));
+    }
+    if (basename(part.argv[0] ?? "") === "cd") dirs.set(part.scope, cdDirectory(part, dir));
+  }
+
+  if (evaluations.some((result) => result.verdict === "deny")) return choose(evaluations);
+  if (parsed.unsafe !== undefined) {
     if (env.mode === "plan") return decision("deny", [flag(command, "plan mode")]);
-    return decision("ask", [flag(command, `unparsed: ${parsed.unsafe ?? parsedSegments.find((segment) => segment.unsafe)?.unsafe ?? "unsafe command"}`)]);
+    return decision("ask", [flag(command, `unparsed: ${parsed.unsafe}`)]);
   }
   return choose(evaluations);
 }
@@ -289,7 +172,8 @@ export function decide(call: Call, env: Env): Decision {
   if (family === "Read" || family === "Edit") {
     const path = call.path ?? (family === "Read" && ["grep", "find", "ls"].includes(call.tool) ? env.cwd : "");
     if (!path) return decision(family === "Read" ? "allow" : "ask", family === "Read" ? [] : [flag(call.tool, "no allow rule")]);
-    return choose([evaluatePath(path, family, env)]);
+    const unknownTilde = path.startsWith("~") && path[1] !== "/" && path !== "~";
+    return choose([evaluatePath(unknownTilde ? resolve("/", path) : path, family, env, unknownTilde)]);
   }
 
   const deny = customRule(env.config.deny, call.tool);
@@ -331,11 +215,5 @@ export function isUnattended(setting: "auto" | boolean, hasUI: boolean, env: Nod
 }
 
 export function toBlock(d: Decision): { block: true; reason: string } {
-  if (d.verdict === "allow") return { block: true, reason: d.reason };
-  const first = d.flags[0];
-  if (!first) return { block: true, reason: d.reason };
-  return {
-    block: true,
-    reason: `permission: \`${first.label}\` ${d.verdict === "deny" ? "is denied" : "needs approval"} (${first.rule}). It was not run. Use a read-only alternative, or report that this step needs the orchestrator.`,
-  };
+  return { block: true, reason: d.reason };
 }

@@ -4,7 +4,7 @@ import { parse, type Part } from "../extensions/shell.ts";
 import { CODE_RUNNERS, isReadOnly } from "../extensions/readonly.ts";
 
 function part(text: string): Part {
-  if (text === "") return { argv: [], assignments: [], redirects: [], text: "" };
+  if (text === "") return { argv: [], assignments: [], redirects: [], text: "", scope: "" };
   const parsed = parse(text);
   assert.ok(parsed.parts.length > 0, `expected a parsed command: ${text}`);
   return parsed.parts[0];

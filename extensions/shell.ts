@@ -1,7 +1,7 @@
 // Shell lexer: splits a bash command into parts so rules match per sub-command,
 // never against raw text. Fails closed (`unsafe`) on anything it cannot vouch for.
 
-export type Part = { argv: string[]; assignments: string[]; redirects: string[]; text: string };
+export type Part = { argv: string[]; assignments: string[]; redirects: string[]; text: string; scope: string };
 export type ParseResult = { parts: Part[]; unsafe?: string };
 
 type State = { unsafe?: string };
@@ -46,7 +46,7 @@ function readBacktick(s: string, start: number): { text: string; end: number } {
   return { text, end: -1 };
 }
 
-function scan(s: string, st: State, start: number, closer: ")" | null): { parts: Part[]; end: number } {
+function scan(s: string, st: State, start: number, closer: ")" | null, scope = ""): { parts: Part[]; end: number } {
   const out: Part[] = [];
   let argv: string[] = [];
   let assignments: string[] = [];
@@ -60,6 +60,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null): { parts:
   let mode: Mode = null;
   let hdStrip = false;
   let depth = 0;
+  const scopes: { id: string; children: number }[] = [{ id: scope, children: 0 }];
   const heredocs: Heredoc[] = [];
   let i = start;
 
@@ -81,13 +82,17 @@ function scan(s: string, st: State, start: number, closer: ")" | null): { parts:
     qAt = -1;
     mode = null;
   };
+  const childScope = () => {
+    const parent = scopes[scopes.length - 1];
+    return `${parent.id}/${++parent.children}`;
+  };
   const endCmd = () => {
     endWord();
     if (mode === "heredoc") flag(st, "heredoc without delimiter");
     mode = null;
     if (argv.length > 0) checkRunner(argv, stdinFed, st);
     stdinFed = false;
-    if (argv.length > 0 || redirects.length > 0) out.push({ argv, assignments, redirects, text: argv.join(" ") });
+    if (argv.length > 0 || redirects.length > 0) out.push({ argv, assignments, redirects, text: argv.join(" "), scope: scopes[scopes.length - 1].id });
     out.push(...inner);
     argv = [];
     assignments = [];
@@ -110,13 +115,13 @@ function scan(s: string, st: State, start: number, closer: ")" | null): { parts:
       i = s.length;
       return false;
     }
-    sub(scan(r.text, st, 0, null).parts);
+    sub(scan(r.text, st, 0, null, childScope()).parts);
     i = r.end;
     return true;
   };
   const dollarParen = () => {
     if (s[i + 2] === "(") return arith();
-    const r = scan(s, st, i + 2, ")");
+    const r = scan(s, st, i + 2, ")", childScope());
     sub(r.parts);
     i = r.end;
   };
@@ -128,13 +133,13 @@ function scan(s: string, st: State, start: number, closer: ")" | null): { parts:
     while (j < s.length) {
       const c = s[j];
       if (c === "$" && s[j + 1] === "(") {
-        const r = scan(s, st, j + 2, ")");
+        const r = scan(s, st, j + 2, ")", childScope());
         inner.push(...r.parts);
         j = r.end;
       } else if (c === "`") {
         const r = readBacktick(s, j + 1);
         if (r.end < 0) break;
-        inner.push(...scan(r.text, st, 0, null).parts);
+        inner.push(...scan(r.text, st, 0, null, childScope()).parts);
         j = r.end;
       } else if (c === "(") {
         d++;
@@ -232,9 +237,14 @@ function scan(s: string, st: State, start: number, closer: ")" | null): { parts:
       while (i < s.length && s[i] !== "\n") i++;
     } else if (c === "(" || c === ")") {
       endCmd();
-      if (c === "(") depth++;
-      else if (depth > 0) depth--;
-      else if (closer === ")") return { parts: finish(), end: i + 1 };
+      if (c === "(") {
+        depth++;
+        const id = childScope();
+        scopes.push({ id, children: 0 });
+      } else if (depth > 0) {
+        depth--;
+        scopes.pop();
+      } else if (closer === ")") return { parts: finish(), end: i + 1 };
       else flag(st, "unmatched )");
       i++;
     } else if (c === ";" || c === "|") {
@@ -254,6 +264,8 @@ function scan(s: string, st: State, start: number, closer: ")" | null): { parts:
         flag(st, "process substitution");
         endCmd();
         depth++;
+        const id = childScope();
+        scopes.push({ id, children: 0 });
         i += 2;
         continue;
       }

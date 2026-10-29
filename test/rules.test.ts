@@ -11,7 +11,7 @@ function rule(text: string) {
 }
 
 function part(text: string): Part {
-  return { argv: text ? text.split(" ") : [], assignments: [], redirects: [], text };
+  return { argv: text ? text.split(" ") : [], assignments: [], redirects: [], text, scope: "" };
 }
 
 test("parseRule parses bare and patterned tools and rejects malformed syntax", () => {
