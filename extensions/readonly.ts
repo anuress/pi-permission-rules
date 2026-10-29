@@ -36,41 +36,126 @@ function basename(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
 }
 
+function longOptionName(arg: string): string {
+  const equals = arg.indexOf("=");
+  return equals < 0 ? arg : arg.slice(0, equals);
+}
+
+function hasInlineOptionValue(arg: string): boolean {
+  return arg.includes("=");
+}
+
 function simpleCommandIsReadOnly(command: string, args: string[]): boolean {
-  if (command === "file") return !args.some((arg) => arg.startsWith("-C") || arg === "--compile" || arg.startsWith("--compile="));
-  if (command === "sort") return !hasSortOutput(args);
+  if (command === "file") return fileIsReadOnly(args);
+  if (command === "sort") return sortIsReadOnly(args);
   if (command === "uniq") return uniqOperands(args) <= 1;
-  if (command === "date") return !args.some((arg) => arg === "-s" || arg.startsWith("-s") || arg === "--set" || arg.startsWith("--set="));
+  if (command === "date") return dateIsReadOnly(args);
   if (command === "rg") return !args.some((arg) => arg === "--pre" || arg.startsWith("--pre="));
   if (command === "fd") return !args.some((arg) => ["-x", "-X", "--exec", "--exec-batch"].includes(arg)
     || arg.startsWith("-x") || arg.startsWith("-X") || arg.startsWith("--exec=") || arg.startsWith("--exec-batch="));
   return true;
 }
 
-function hasSortOutput(args: string[]): boolean {
+const SORT_SAFE_LONG_OPTIONS = new Set([
+  "--check", "--debug", "--dictionary-order", "--field-separator", "--general-numeric-sort",
+  "--human-numeric-sort", "--ignore-case", "--ignore-leading-blanks", "--ignore-nonprinting", "--key",
+  "--merge", "--month-sort", "--numeric-sort", "--parallel", "--random-sort", "--reverse", "--stable",
+  "--unique", "--version-sort", "--zero-terminated", "--buffer-size",
+]);
+const SORT_LONG_VALUE_OPTIONS = new Set(["--field-separator", "--key", "--parallel", "--buffer-size"]);
+
+function sortIsReadOnly(args: string[]): boolean {
   let options = true;
-  for (const arg of args) {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
     if (options && arg === "--") {
       options = false;
       continue;
     }
     if (!options) continue;
-    if (["--output", "--compress-program", "--temporary-directory"].some((option) =>
-      arg === option || arg.startsWith(`${option}=`))) return true;
-    if (!arg.startsWith("-") || arg === "-" || arg.startsWith("--")) continue;
+    if (arg.startsWith("--")) {
+      const option = longOptionName(arg);
+      if (!SORT_SAFE_LONG_OPTIONS.has(option)) return false;
+      if (SORT_LONG_VALUE_OPTIONS.has(option) && !hasInlineOptionValue(arg)) {
+        if (args[i + 1] === undefined || args[i + 1].startsWith("--")) return false;
+        i++;
+      }
+      continue;
+    }
+    if (!arg.startsWith("-") || arg === "-") continue;
 
-    for (let i = 1; i < arg.length; i++) {
-      const option = arg[i];
-      if (option === "o" || option === "T") return true;
+    for (let j = 1; j < arg.length; j++) {
+      const option = arg[j];
+      if (option === "o" || option === "T") return false;
       if (option === "k" || option === "t" || option === "S") break;
     }
   }
-  return false;
+  return true;
+}
+
+const DATE_SAFE_LONG_OPTIONS = new Set([
+  "--date", "--iso-8601", "--rfc-3339", "--rfc-email", "--utc", "--universal", "--reference", "--debug",
+]);
+const DATE_LONG_VALUE_OPTIONS = new Set(["--date", "--reference"]);
+
+function dateIsReadOnly(args: string[]): boolean {
+  let options = true;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (options && arg === "--") {
+      options = false;
+      continue;
+    }
+    if (!options) continue;
+    if (arg.startsWith("--")) {
+      const option = longOptionName(arg);
+      if (!DATE_SAFE_LONG_OPTIONS.has(option)) return false;
+      if (DATE_LONG_VALUE_OPTIONS.has(option) && !hasInlineOptionValue(arg)) {
+        if (args[i + 1] === undefined || args[i + 1].startsWith("--")) return false;
+        i++;
+      }
+      continue;
+    }
+    if (arg === "-s" || (arg.startsWith("-s") && arg !== "--")) return false;
+  }
+  return true;
+}
+
+const FILE_SAFE_LONG_OPTIONS = new Set([
+  "--brief", "--mime", "--mime-type", "--mime-encoding", "--dereference", "--no-dereference", "--keep-going",
+  "--raw", "--print0", "--no-pad", "--separator", "--exclude", "--files-from", "--uncompress",
+  "--special-files", "--extension", "--apple", "--no-buffer",
+]);
+const FILE_LONG_VALUE_OPTIONS = new Set(["--separator", "--exclude", "--files-from"]);
+
+function fileIsReadOnly(args: string[]): boolean {
+  let options = true;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (options && arg === "--") {
+      options = false;
+      continue;
+    }
+    if (!options) continue;
+    if (arg.startsWith("--")) {
+      const option = longOptionName(arg);
+      if (!FILE_SAFE_LONG_OPTIONS.has(option)) return false;
+      if (FILE_LONG_VALUE_OPTIONS.has(option) && !hasInlineOptionValue(arg)) {
+        if (args[i + 1] === undefined || args[i + 1].startsWith("--")) return false;
+        i++;
+      }
+    } else if (arg.startsWith("-") && arg !== "-" && arg.slice(1).includes("C")) return false;
+  }
+  return true;
 }
 
 const UNIQ_VALUELESS_LONG_OPTIONS = new Set([
   "--count", "--repeated", "--unique", "--ignore-case", "--zero-terminated", "--all-repeated", "--group",
 ]);
+const UNIQ_SAFE_LONG_OPTIONS = new Set([
+  ...UNIQ_VALUELESS_LONG_OPTIONS, "--skip-fields", "--skip-chars", "--check-chars",
+]);
+const UNIQ_LONG_VALUE_OPTIONS = new Set(["--skip-fields", "--skip-chars", "--check-chars"]);
 
 function uniqOperands(args: string[]): number {
   let operands = 0;
@@ -85,14 +170,21 @@ function uniqOperands(args: string[]): number {
       operands++;
       continue;
     }
+    if (arg.startsWith("--")) {
+      const option = longOptionName(arg);
+      if (!UNIQ_SAFE_LONG_OPTIONS.has(option)) return 2;
+      if (UNIQ_LONG_VALUE_OPTIONS.has(option) && !hasInlineOptionValue(arg)) {
+        if (args[i + 1] === undefined || args[i + 1].startsWith("--")) return 2;
+        i++;
+      }
+      continue;
+    }
 
-    if (["-f", "--skip-fields", "-s", "--skip-chars", "-w", "--check-chars"].includes(arg)) {
+    if (["-f", "-s", "-w"].includes(arg)) {
       if (args[i + 1] === undefined) return 2;
       i++;
       continue;
     }
-    if (["--skip-fields", "--skip-chars", "--check-chars", "--all-repeated", "--group"].some((option) => arg.startsWith(`${option}=`))) continue;
-    if (UNIQ_VALUELESS_LONG_OPTIONS.has(arg)) continue;
     if (/^-[fsw]\d+$/.test(arg)) continue;
     if (/^-[cduiDz]+$/.test(arg)) continue;
     return 2;
@@ -105,9 +197,11 @@ function findIsReadOnly(args: string[]): boolean {
     || arg.startsWith("-fprint"));
 }
 
-const SED_NO_ARGUMENT_OPTIONS = new Set([
-  "-n", "-E", "-r", "-u", "-s", "-z", "--quiet", "--silent", "--debug", "--posix", "--sandbox",
+const SED_SAFE_LONG_OPTIONS = new Set([
+  "--quiet", "--silent", "--regexp-extended", "--posix", "--null-data", "--zero-terminated",
+  "--separate", "--debug", "--sandbox", "--expression",
 ]);
+const SED_NO_ARGUMENT_OPTIONS = new Set(["-n", "-E", "-r", "-u", "-s", "-z"]);
 
 function sedIsReadOnly(args: string[]): boolean {
   const scripts: string[] = [];
@@ -119,16 +213,22 @@ function sedIsReadOnly(args: string[]): boolean {
       options = false;
       continue;
     }
-    if (options && (arg === "-i" || arg.startsWith("-i") || arg === "--in-place" || arg.startsWith("--in-place="))) return false;
-    if (options && (arg === "-f" || arg.startsWith("-f") || arg === "--file" || arg.startsWith("--file="))) return false;
-    if (options && (arg === "-e" || arg === "--expression")) {
-      if (args[i + 1] === undefined) return false;
-      scripts.push(args[++i]);
-      hasExplicitScript = true;
+    if (options && arg.startsWith("--")) {
+      const option = longOptionName(arg);
+      if (!SED_SAFE_LONG_OPTIONS.has(option)) return false;
+      if (option === "--expression") {
+        const script = hasInlineOptionValue(arg) ? arg.slice(arg.indexOf("=") + 1) : args[++i];
+        if (script === undefined) return false;
+        scripts.push(script);
+        hasExplicitScript = true;
+      }
       continue;
     }
-    if (options && arg.startsWith("--expression=")) {
-      scripts.push(arg.slice("--expression=".length));
+    if (options && (arg === "-i" || arg.startsWith("-i"))) return false;
+    if (options && (arg === "-f" || arg.startsWith("-f") || arg === "--file" || arg.startsWith("--file="))) return false;
+    if (options && arg === "-e") {
+      if (args[i + 1] === undefined) return false;
+      scripts.push(args[++i]);
       hasExplicitScript = true;
       continue;
     }
@@ -195,12 +295,14 @@ function sedScriptIsReadOnly(script: string): boolean {
   return true;
 }
 
-const AWK_VALUE_OPTIONS = new Set(["-F", "-v", "--field-separator", "--assign"]);
-const AWK_UNSAFE_OPTIONS = ["-i", "--include", "-l", "--load", "-E", "--exec", "-p", "--profile"];
-const AWK_FLAG_OPTIONS = new Set([
-  "-b", "-c", "-g", "-M", "-P", "-s", "-S", "-t", "--lint", "--posix",
-  "--traditional", "--characters-as-bytes", "--re-interval", "--sandbox",
+const AWK_VALUE_OPTIONS = new Set(["-F", "-v"]);
+const AWK_SAFE_LONG_OPTIONS = new Set([
+  "--field-separator", "--assign", "--posix", "--traditional", "--re-interval", "--characters-as-bytes",
+  "--sandbox", "--lint", "--non-decimal-data",
 ]);
+const AWK_LONG_VALUE_OPTIONS = new Set(["--field-separator", "--assign"]);
+const AWK_UNSAFE_OPTIONS = ["-i", "-l", "-E", "-p"];
+const AWK_FLAG_OPTIONS = new Set(["-b", "-c", "-g", "-M", "-P", "-s", "-S", "-t"]);
 
 function awkIsReadOnly(args: string[]): boolean {
   let program: string | undefined;
@@ -211,16 +313,23 @@ function awkIsReadOnly(args: string[]): boolean {
       options = false;
       continue;
     }
-    if (options && AWK_UNSAFE_OPTIONS.some((option) => arg === option
-      || (option.startsWith("--") ? arg.startsWith(`${option}=`) : arg.startsWith(option) && arg.length > option.length))) return false;
-    if (options && (arg === "-f" || arg === "--file" || arg.startsWith("--file=") || (arg.startsWith("-f") && arg.length > 2))) return false;
+    if (options && arg.startsWith("--")) {
+      const option = longOptionName(arg);
+      if (!AWK_SAFE_LONG_OPTIONS.has(option)) return false;
+      if (AWK_LONG_VALUE_OPTIONS.has(option) && !hasInlineOptionValue(arg)) {
+        if (args[i + 1] === undefined || args[i + 1].startsWith("--")) return false;
+        i++;
+      }
+      continue;
+    }
+    if (options && AWK_UNSAFE_OPTIONS.some((option) => arg === option || (arg.startsWith(option) && arg.length > option.length))) return false;
+    if (options && (arg === "-f" || (arg.startsWith("-f") && arg.length > 2))) return false;
     if (options && AWK_VALUE_OPTIONS.has(arg)) {
       if (args[i + 1] === undefined) return false;
       i++;
       continue;
     }
-    if (options && ((arg.startsWith("-F") && arg.length > 2) || (arg.startsWith("-v") && arg.length > 2)
-      || arg.startsWith("--field-separator=") || arg.startsWith("--assign="))) continue;
+    if (options && ((arg.startsWith("-F") && arg.length > 2) || (arg.startsWith("-v") && arg.length > 2))) continue;
     if (options && AWK_FLAG_OPTIONS.has(arg)) continue;
     if (options && arg.startsWith("-")) return false;
     program = arg;
@@ -229,6 +338,17 @@ function awkIsReadOnly(args: string[]): boolean {
   if (program === undefined) return false;
   return !program.includes(">") && !program.includes("|") && !program.includes("@load") && !program.includes("@include")
     && !/\bsystem\s*\(/.test(program) && !/\bgetline\b/.test(program);
+}
+
+function hasUnsafeGitReadOption(args: string[]): boolean {
+  const dangerousOptions = ["--output", "--open-files-in-pager"];
+  for (const arg of args) {
+    if (arg === "--") break;
+    if (!arg.startsWith("--")) continue;
+    const name = longOptionName(arg);
+    if (name.length >= 4 && dangerousOptions.some((option) => option.startsWith(name))) return true;
+  }
+  return false;
 }
 
 function gitIsReadOnly(args: string[]): boolean {
@@ -249,7 +369,7 @@ function gitIsReadOnly(args: string[]): boolean {
   if (i >= args.length) return false;
 
   const [subcommand, ...rest] = args.slice(i);
-  if (rest.some((arg) => arg.startsWith("--output"))) return false;
+  if (hasUnsafeGitReadOption(rest)) return false;
   if (READ_ONLY_GIT_COMMANDS.has(subcommand)) {
     return subcommand !== "grep" || !rest.some((arg) => arg === "-O" || arg.startsWith("-O")
       || arg === "--open-files-in-pager" || arg.startsWith("--open-files-in-pager="));
