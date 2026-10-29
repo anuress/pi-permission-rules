@@ -16,6 +16,7 @@ export const CODE_RUNNERS: ReadonlySet<string> = new Set([
 ]);
 
 export function isReadOnly(part: Part, extra: readonly string[]): boolean {
+  if (part.assignments.length > 0) return false;
   const first = part.argv[0];
   if (first === undefined) return true;
   if (first.includes("$")) return false;
@@ -36,6 +37,7 @@ function basename(path: string): string {
 }
 
 function simpleCommandIsReadOnly(command: string, args: string[]): boolean {
+  if (command === "file") return !args.some((arg) => arg.startsWith("-C") || arg === "--compile" || arg.startsWith("--compile="));
   if (command === "sort") return !hasSortOutput(args);
   if (command === "uniq") return uniqOperands(args) <= 1;
   if (command === "date") return !args.some((arg) => arg === "-s" || arg.startsWith("-s") || arg === "--set" || arg.startsWith("--set="));
@@ -53,11 +55,22 @@ function hasSortOutput(args: string[]): boolean {
       continue;
     }
     if (!options) continue;
-    if (arg === "-o" || (arg.startsWith("-o") && arg.length > 2)
-      || arg === "--output" || arg.startsWith("--output=")) return true;
+    if (["--output", "--compress-program", "--temporary-directory"].some((option) =>
+      arg === option || arg.startsWith(`${option}=`))) return true;
+    if (!arg.startsWith("-") || arg === "-" || arg.startsWith("--")) continue;
+
+    for (let i = 1; i < arg.length; i++) {
+      const option = arg[i];
+      if (option === "o" || option === "T") return true;
+      if (option === "k" || option === "t" || option === "S") break;
+    }
   }
   return false;
 }
+
+const UNIQ_VALUELESS_LONG_OPTIONS = new Set([
+  "--count", "--repeated", "--unique", "--ignore-case", "--zero-terminated", "--all-repeated", "--group",
+]);
 
 function uniqOperands(args: string[]): number {
   let operands = 0;
@@ -78,7 +91,8 @@ function uniqOperands(args: string[]): number {
       i++;
       continue;
     }
-    if (["--skip-fields", "--skip-chars", "--check-chars"].some((option) => arg.startsWith(`${option}=`))) continue;
+    if (["--skip-fields", "--skip-chars", "--check-chars", "--all-repeated", "--group"].some((option) => arg.startsWith(`${option}=`))) continue;
+    if (UNIQ_VALUELESS_LONG_OPTIONS.has(arg)) continue;
     if (/^-[fsw]\d+$/.test(arg)) continue;
     if (/^-[cduiDz]+$/.test(arg)) continue;
     return 2;
@@ -91,8 +105,6 @@ function findIsReadOnly(args: string[]): boolean {
     || arg.startsWith("-fprint"));
 }
 
-const SED_WRITE_COMMAND = /(^|[;{}\n])\s*[wWe](\s|$)/;
-const SED_WRITE_SUBSTITUTION = /s(.).*?\1.*?\1[a-zA-Z0-9]*[we]/;
 const SED_NO_ARGUMENT_OPTIONS = new Set([
   "-n", "-E", "-r", "-u", "-s", "-z", "--quiet", "--silent", "--debug", "--posix", "--sandbox",
 ]);
@@ -132,12 +144,61 @@ function sedIsReadOnly(args: string[]): boolean {
       hasExplicitScript = true;
     }
   }
-  return !scripts.some((script) => SED_WRITE_COMMAND.test(script) || SED_WRITE_SUBSTITUTION.test(script));
+  return scripts.every(sedScriptIsReadOnly);
+}
+
+function isSedDelimiter(char: string): boolean {
+  return char !== "\\" && !/[A-Za-z0-9]/.test(char) && char.trim() !== "";
+}
+
+function findSedDelimiter(script: string, start: number, delimiter: string): number {
+  for (let i = start; i < script.length; i++) {
+    if (script[i] === "\\") i++;
+    else if (script[i] === delimiter) return i;
+  }
+  return -1;
+}
+
+function sedScriptIsReadOnly(script: string): boolean {
+  for (let i = 0; i < script.length;) {
+    const char = script[i];
+    if (char === "/") {
+      const end = findSedDelimiter(script, i + 1, "/");
+      if (end < 0) return false;
+      i = end + 1;
+      continue;
+    }
+    if (char === "\\" && i + 1 < script.length && isSedDelimiter(script[i + 1])) {
+      const delimiter = script[i + 1];
+      const end = findSedDelimiter(script, i + 2, delimiter);
+      if (end < 0) return false;
+      i = end + 1;
+      continue;
+    }
+    if ((char === "s" || char === "y") && i + 1 < script.length && isSedDelimiter(script[i + 1])) {
+      const delimiter = script[i + 1];
+      const patternEnd = findSedDelimiter(script, i + 2, delimiter);
+      if (patternEnd < 0) return false;
+      const replacementEnd = findSedDelimiter(script, patternEnd + 1, delimiter);
+      if (replacementEnd < 0) return false;
+      if (char === "s") {
+        let flagsEnd = replacementEnd + 1;
+        while (/[A-Za-z0-9]/.test(script[flagsEnd] ?? "")) flagsEnd++;
+        if (/[we]/i.test(script.slice(replacementEnd + 1, flagsEnd))) return false;
+        i = flagsEnd;
+      } else i = replacementEnd + 1;
+      continue;
+    }
+    if (char === "w" || char === "W" || char === "e") return false;
+    i++;
+  }
+  return true;
 }
 
 const AWK_VALUE_OPTIONS = new Set(["-F", "-v", "--field-separator", "--assign"]);
+const AWK_UNSAFE_OPTIONS = ["-i", "--include", "-l", "--load", "-E", "--exec", "-p", "--profile"];
 const AWK_FLAG_OPTIONS = new Set([
-  "-b", "-c", "-g", "-M", "-p", "-P", "-s", "-S", "-t", "--lint", "--posix",
+  "-b", "-c", "-g", "-M", "-P", "-s", "-S", "-t", "--lint", "--posix",
   "--traditional", "--characters-as-bytes", "--re-interval", "--sandbox",
 ]);
 
@@ -150,6 +211,8 @@ function awkIsReadOnly(args: string[]): boolean {
       options = false;
       continue;
     }
+    if (options && AWK_UNSAFE_OPTIONS.some((option) => arg === option
+      || (option.startsWith("--") ? arg.startsWith(`${option}=`) : arg.startsWith(option) && arg.length > option.length))) return false;
     if (options && (arg === "-f" || arg === "--file" || arg.startsWith("--file=") || (arg.startsWith("-f") && arg.length > 2))) return false;
     if (options && AWK_VALUE_OPTIONS.has(arg)) {
       if (args[i + 1] === undefined) return false;
@@ -164,7 +227,7 @@ function awkIsReadOnly(args: string[]): boolean {
     break;
   }
   if (program === undefined) return false;
-  return !program.includes(">") && !program.includes("|")
+  return !program.includes(">") && !program.includes("|") && !program.includes("@load") && !program.includes("@include")
     && !/\bsystem\s*\(/.test(program) && !/\bgetline\b/.test(program);
 }
 
@@ -172,7 +235,9 @@ function gitIsReadOnly(args: string[]): boolean {
   let i = 0;
   while (i < args.length) {
     const arg = args[i];
-    if (arg === "-C" || arg === "-c" || arg === "--git-dir" || arg === "--work-tree") {
+    if (arg === "-c" || (arg.startsWith("-c") && arg.length > 2)
+      || arg === "--config-env" || arg.startsWith("--config-env=")) return false;
+    if (arg === "-C" || arg === "--git-dir" || arg === "--work-tree") {
       if (args[i + 1] === undefined) return false;
       i += 2;
     } else if (arg === "--no-pager" || arg.startsWith("--git-dir=") || arg.startsWith("--work-tree=")) {

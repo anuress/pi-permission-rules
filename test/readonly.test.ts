@@ -4,7 +4,7 @@ import { parse, type Part } from "../extensions/shell.ts";
 import { CODE_RUNNERS, isReadOnly } from "../extensions/readonly.ts";
 
 function part(text: string): Part {
-  if (text === "") return { argv: [], redirects: [], text: "" };
+  if (text === "") return { argv: [], assignments: [], redirects: [], text: "" };
   const parsed = parse(text);
   assert.ok(parsed.parts.length > 0, `expected a parsed command: ${text}`);
   return parsed.parts[0];
@@ -23,18 +23,37 @@ const readOnlyCases: [string, boolean][] = [
   ["env rm x", false],
   ["/usr/bin/grep x", true],
   ["$COMMAND x", false],
+  ["GIT_EXTERNAL_DIFF=/x git diff", false],
+  ["LD_PRELOAD=/x ls", false],
+  ["PAGER=/x git log", false],
   ["", true],
   ["sort input", true],
-  ["sort -o output input", false],
-  ["sort --output=output input", false],
+  ["sort --key=1,1 input", true],
+  ["sort --output out.txt in", false],
+  ["sort -uo out.txt in", false],
+  ...[
+    "--compress-program /tmp/evil", "--compress-program=/tmp/evil", "-T /tmp", "-T/tmp",
+    "--temporary-directory /tmp", "--temporary-directory=/tmp", "-o f", "-of", "-uo f", "-no out", "-ro out",
+    "--output f", "--output=f",
+  ].map((options) => [`sort ${options} input`, false] as [string, boolean]),
   ["uniq input", true],
   ["uniq input output", false],
+  ...[
+    "--count", "--repeated", "--unique", "--ignore-case", "--zero-terminated", "--all-repeated",
+    "--all-repeated=separate", "--group", "--group=separate",
+  ].map((option) => [`uniq ${option} file`, true] as [string, boolean]),
+  ["uniq --count", true],
+  ["uniq --all-repeated=separate", true],
   ["date -s value", false],
   ["date --set=value", false],
   ["rg pattern file", true],
   ["rg --pre cat pattern", false],
   ["rg --pre=cat pattern", false],
   ["fd pattern", true],
+  ["file -C -m /tmp/x", false],
+  ["file -Cm /tmp/x", false],
+  ["file --compile", false],
+  ["file --compile=/tmp/x", false],
   ...["-x", "--exec", "-X", "--exec-batch"].map(
     (flag) => [`fd ${flag} cmd`, false] as [string, boolean],
   ),
@@ -55,12 +74,36 @@ const readOnlyCases: [string, boolean][] = [
   ["sed -e 'w output' file", false],
   ["sed -e 's/a/b/w output' file", false],
   ["sed -e 's/a/b/e' file", false],
+  ["sed \"1e touch /tmp/pwned\" file", false],
+  ["sed '$w out' file", false],
+  ["sed '/x/w out' file", false],
+  ["sed -n '/a/,/b/W out' f", false],
+  ["sed 's/a/b/w out' file", false],
+  ["sed 's/a/b/e' file", false],
+  ["sed -n 1,5p f", true],
+  ["sed -n '/error/p' f", true],
+  ["sed -E 's/(a+)/\\1x/' f", true],
+  ["sed 's#foo\\#bar#baz#g' f", true],
+  ["sed '\\%error%p' f", true],
+  ["sed 'y/ew/ab/' f", true],
+  ["sed -ni 's/a/b/' f", false],
+  ["sed -E -i 's/a/b/' f", false],
+  ["sed -iE 's/a/b/' f", false],
+  ["sed '\\%x%e id' f", false],
+  ["sed 's/a/b' f", false],
+  ["sed 'y/a/b' f", false],
+  ["sed /x f", false],
 
   // awk: only a simple, inline, non-executing program is allowed.
   ["awk '{print $1}' file", true],
   ["awk -v x=1 -F , '{print x}' file", true],
   ["awk -f script.awk file", false],
   ["awk --file=script.awk", false],
+  ...["-i include.awk", "-iinclude.awk", "--include include.awk", "--include=include.awk", "-l library", "-llibrary", "--load library", "--load=library", "-E script.awk", "-Escript.awk", "--exec script.awk", "--exec=script.awk", "-p", "-p=/tmp/profile", "--profile", "--profile=/tmp/profile"].map(
+    (options) => [`awk ${options} '{print}' file`, false] as [string, boolean],
+  ),
+  ["awk '@load \"/tmp/evil\"' file", false],
+  ["awk '@include \"/tmp/other.awk\"' file", false],
   ["awk '{system(\"x\")}'", false],
   ["awk '{print x > \"out\"}'", false],
   ["awk '{print x | \"cmd\"}'", false],
@@ -70,8 +113,13 @@ const readOnlyCases: [string, boolean][] = [
   ...["status", "log", "show", "diff", "blame", "rev-parse", "ls-files", "ls-tree", "grep", "merge-base", "cat-file", "describe", "shortlog", "reflog"].map(
     (subcommand) => [`git ${subcommand}`, true] as [string, boolean],
   ),
-  ["git -C /x --no-pager -c a=b log", true],
+  ["git -C /x --no-pager log", true],
+  ["git --git-dir=/x log", true],
+  ["git --work-tree=/x log", true],
   ["git -C /x push", false],
+  ...["-c diff.external=/x", "-c core.fsmonitor=/x", "-c color.ui=never", "-cfoo=bar", "--config-env", "--config-env=core.pager=ENV"].map(
+    (options) => [`git ${options} diff`, false] as [string, boolean],
+  ),
   ["git diff --output=f", false],
   ["git grep -O pager pattern", false],
   ["git grep --open-files-in-pager=pager pattern", false],
@@ -107,6 +155,8 @@ const readOnlyCases: [string, boolean][] = [
   ["gh api repos/o/r", true],
   ["gh api repos/o/r --method GET", true],
   ["gh api repos/o/r -X GET", true],
+  ["gh api -XGET repos/o/r", true],
+  ["gh api -XPOST repos/o/r", false],
   ["gh api repos/o/r -X PATCH", false],
   ["gh api repos/o/r --method=POST", false],
   ...["-f", "-F", "--field", "--raw-field", "--input"].map(

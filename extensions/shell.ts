@@ -1,7 +1,7 @@
 // Shell lexer: splits a bash command into parts so rules match per sub-command,
 // never against raw text. Fails closed (`unsafe`) on anything it cannot vouch for.
 
-export type Part = { argv: string[]; redirects: string[]; text: string };
+export type Part = { argv: string[]; assignments: string[]; redirects: string[]; text: string };
 export type ParseResult = { parts: Part[]; unsafe?: string };
 
 type State = { unsafe?: string };
@@ -49,6 +49,7 @@ function readBacktick(s: string, start: number): { text: string; end: number } {
 function scan(s: string, st: State, start: number, closer: ")" | null): { parts: Part[]; end: number } {
   const out: Part[] = [];
   let argv: string[] = [];
+  let assignments: string[] = [];
   let redirects: string[] = [];
   let inner: Part[] = [];
   let w = "";
@@ -71,7 +72,8 @@ function scan(s: string, st: State, start: number, closer: ")" | null): { parts:
     } else if (mode === null) {
       const raw = qAt < 0 ? w : w.slice(0, qAt);
       const atStart = argv.length === 0;
-      if (!(atStart && ASSIGNMENT.test(raw)) && !(atStart && !quoted && RESERVED.has(w))) argv.push(w);
+      if (atStart && ASSIGNMENT.test(raw)) assignments.push(w);
+      else if (!(atStart && !quoted && RESERVED.has(w))) argv.push(w);
     }
     w = "";
     inWord = false;
@@ -85,9 +87,10 @@ function scan(s: string, st: State, start: number, closer: ")" | null): { parts:
     mode = null;
     if (argv.length > 0) checkRunner(argv, stdinFed, st);
     stdinFed = false;
-    if (argv.length > 0 || redirects.length > 0) out.push({ argv, redirects, text: argv.join(" ") });
+    if (argv.length > 0 || redirects.length > 0) out.push({ argv, assignments, redirects, text: argv.join(" ") });
     out.push(...inner);
     argv = [];
+    assignments = [];
     redirects = [];
     inner = [];
   };

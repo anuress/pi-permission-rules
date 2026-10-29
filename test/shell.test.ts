@@ -40,6 +40,8 @@ test("command substitution adds inner parts", () => {
 
 test("assignments stripped", () => {
   assert.deepEqual(texts("FOO=1 BAR=2 ./gradlew :app:test"), ["./gradlew :app:test"]);
+  assert.deepEqual(parse('FOO=1 BAR="x y" ls').parts[0].assignments, ["FOO=1", "BAR=x y"]);
+  assert.deepEqual(parse("ls").parts[0].assignments, []);
 });
 
 test("line continuation", () => {
