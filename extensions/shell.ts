@@ -10,6 +10,10 @@ type Mode = null | "redir" | "skip" | "heredoc";
 
 const PLACEHOLDER = "$(…)";
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+// Reserved words dropped at command position so the real command is matched.
+const RESERVED = new Set(["if", "then", "else", "elif", "do", "while", "until", "!", "{", "}", "fi", "done", "esac"]);
+const SHELLS = new Set(["bash", "sh", "zsh"]);
+const FD_DUP = /^(\d+-?|-)(?![^\s;|&<>()])/;
 
 export function parse(command: string): ParseResult {
   const st: State = {};
@@ -50,6 +54,8 @@ function scan(s: string, st: State, start: number, closer: ")" | null): { parts:
   let w = "";
   let inWord = false;
   let quoted = false;
+  let qAt = -1; // length of the unquoted prefix of the current word
+  let stdinFed = false;
   let mode: Mode = null;
   let hdStrip = false;
   let depth = 0;
@@ -62,22 +68,32 @@ function scan(s: string, st: State, start: number, closer: ")" | null): { parts:
       if (w !== "/dev/null") redirects.push(w);
     } else if (mode === "heredoc") {
       heredocs.push({ term: w, strip: hdStrip, expand: !quoted });
-    } else if (mode === null && !(argv.length === 0 && !quoted && ASSIGNMENT.test(w))) {
-      argv.push(w);
+    } else if (mode === null) {
+      const raw = qAt < 0 ? w : w.slice(0, qAt);
+      const atStart = argv.length === 0;
+      if (!(atStart && ASSIGNMENT.test(raw)) && !(atStart && !quoted && RESERVED.has(w))) argv.push(w);
     }
     w = "";
     inWord = false;
     quoted = false;
+    qAt = -1;
     mode = null;
   };
   const endCmd = () => {
     endWord();
+    if (mode === "heredoc") flag(st, "heredoc without delimiter");
     mode = null;
+    if (argv.length > 0) checkRunner(argv, stdinFed, st);
+    stdinFed = false;
     if (argv.length > 0 || redirects.length > 0) out.push({ argv, redirects, text: argv.join(" ") });
     out.push(...inner);
     argv = [];
     redirects = [];
     inner = [];
+  };
+  const mark = () => {
+    if (!quoted) qAt = w.length;
+    inWord = quoted = true;
   };
   const sub = (parts: Part[]) => {
     w += PLACEHOLDER;
@@ -96,9 +112,44 @@ function scan(s: string, st: State, start: number, closer: ")" | null): { parts:
     return true;
   };
   const dollarParen = () => {
+    if (s[i + 2] === "(") return arith();
     const r = scan(s, st, i + 2, ")");
     sub(r.parts);
     i = r.end;
+  };
+  // $(( … )): consume to the balanced "))" without emitting a part; nested
+  // substitutions inside still produce parts.
+  const arith = () => {
+    let j = i + 3;
+    let d = 0;
+    while (j < s.length) {
+      const c = s[j];
+      if (c === "$" && s[j + 1] === "(") {
+        const r = scan(s, st, j + 2, ")");
+        inner.push(...r.parts);
+        j = r.end;
+      } else if (c === "`") {
+        const r = readBacktick(s, j + 1);
+        if (r.end < 0) break;
+        inner.push(...scan(r.text, st, 0, null).parts);
+        j = r.end;
+      } else if (c === "(") {
+        d++;
+        j++;
+      } else if (c === ")") {
+        if (d > 0) {
+          d--;
+          j++;
+        } else if (s[j + 1] === ")") {
+          w += "$((…))";
+          inWord = true;
+          i = j + 2;
+          return;
+        } else break;
+      } else j++;
+    }
+    flag(st, "unterminated arithmetic expansion");
+    i = s.length;
   };
   const eatHeredocs = () => {
     for (const hd of heredocs.splice(0)) {
@@ -111,7 +162,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null): { parts:
           found = true;
           break;
         }
-        if (hd.expand && (line.includes("$(") || line.includes("`"))) flag(st, "command substitution in heredoc body");
+        if (hd.expand && (/\$\((?!\()/.test(line) || line.includes("`"))) flag(st, "command substitution in heredoc body");
       }
       if (!found) flag(st, "unterminated heredoc");
     }
@@ -130,13 +181,13 @@ function scan(s: string, st: State, start: number, closer: ")" | null): { parts:
     } else if (c === "\\") {
       if (n === "\n") i += 2;
       else {
+        mark();
         if (n !== undefined) w += n;
-        inWord = quoted = true;
         i += 2;
       }
     } else if (c === "'") {
       const e = s.indexOf("'", i + 1);
-      inWord = quoted = true;
+      mark();
       if (e < 0) {
         flag(st, "unterminated single quote");
         i = s.length;
@@ -145,7 +196,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null): { parts:
         i = e + 1;
       }
     } else if (c === '"') {
-      inWord = quoted = true;
+      mark();
       i++;
       let closed = false;
       while (i < s.length) {
@@ -181,6 +232,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null): { parts:
       if (c === "(") depth++;
       else if (depth > 0) depth--;
       else if (closer === ")") return { parts: finish(), end: i + 1 };
+      else flag(st, "unmatched )");
       i++;
     } else if (c === ";" || c === "|") {
       endCmd();
@@ -210,7 +262,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null): { parts:
       if (c === ">") {
         if (s[j] === ">" || s[j] === "|") j++;
         else if (s[j] === "&") {
-          const m = /^(\d+-?|-)/.exec(s.slice(j + 1));
+          const m = FD_DUP.exec(s.slice(j + 1));
           if (m) {
             i = j + 1 + m[0].length;
             continue;
@@ -223,13 +275,15 @@ function scan(s: string, st: State, start: number, closer: ")" | null): { parts:
         if (s[j] === "<") {
           j++;
           mode = "skip";
+          stdinFed = true;
         } else {
+          stdinFed = true;
           hdStrip = s[j] === "-";
           if (hdStrip) j++;
           mode = "heredoc";
         }
       } else if (s[j] === "&") {
-        const m = /^(\d+-?|-)/.exec(s.slice(j + 1));
+        const m = FD_DUP.exec(s.slice(j + 1));
         j += 1 + (m ? m[0].length : 0);
         mode = m ? null : "skip";
       } else mode = "skip";
@@ -248,4 +302,13 @@ function scan(s: string, st: State, start: number, closer: ")" | null): { parts:
     if (heredocs.length > 0) flag(st, "unterminated heredoc");
     return out;
   }
+}
+
+// Commands that run code the lexer cannot see: fail closed.
+function checkRunner(argv: string[], stdinFed: boolean, st: State): void {
+  const name = argv[0].split("/").pop() ?? "";
+  if (["eval", "source", ".", "exec"].includes(name)) return flag(st, `${name} runs unparsed code`);
+  if (!SHELLS.has(name)) return;
+  if (argv.slice(1).some((a) => /^-[a-z]*c[a-z]*$/.test(a))) flag(st, `${name} -c runs unparsed code`);
+  else if (stdinFed) flag(st, `${name} reads a script from stdin`);
 }
