@@ -305,10 +305,32 @@ function scan(s: string, st: State, start: number, closer: ")" | null): { parts:
 }
 
 // Commands that run code the lexer cannot see: fail closed.
+const WRAPPERS = new Set(["env", "command", "nohup", "time", "nice", "timeout"]);
+const OPTION_VALUE = new Set(["-n", "-s", "-k", "-u", "-C"]);
+
 function checkRunner(argv: string[], stdinFed: boolean, st: State): void {
-  const name = argv[0].split("/").pop() ?? "";
+  let i = 0;
+  let name = "";
+  for (;;) {
+    const word = argv[i] ?? "";
+    if (word.includes("$")) return flag(st, "command word is a variable");
+    name = word.split("/").pop() ?? "";
+    if (!WRAPPERS.has(name)) break;
+    i++;
+    while (i < argv.length) {
+      const a = argv[i];
+      if (a.startsWith("-")) i += OPTION_VALUE.has(a) ? 2 : 1;
+      else if (name === "env" && ASSIGNMENT.test(a)) i++;
+      else if (name === "timeout" && /^\d/.test(a)) i++;
+      else break;
+    }
+    if (i >= argv.length) return;
+  }
   if (["eval", "source", ".", "exec"].includes(name)) return flag(st, `${name} runs unparsed code`);
   if (!SHELLS.has(name)) return;
-  if (argv.slice(1).some((a) => /^-[a-z]*c[a-z]*$/.test(a))) flag(st, `${name} -c runs unparsed code`);
-  else if (stdinFed) flag(st, `${name} reads a script from stdin`);
+  const args = argv.slice(i + 1);
+  if (args.some((a) => /^-[a-z]*c[a-z]*$/.test(a))) flag(st, `${name} -c runs unparsed code`);
+  else if (stdinFed || !args.some((a) => !a.startsWith("-")) || args.includes("-s")) {
+    flag(st, `${name} reads script from stdin`);
+  }
 }

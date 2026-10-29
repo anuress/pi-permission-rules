@@ -84,6 +84,16 @@ test("code runners fail closed", () => {
   for (const c of ["bash script.sh", "sh -n x"]) assert.equal(parse(c).unsafe, undefined, c);
 });
 
+test("stdin-fed shells, variable command words, wrappers", () => {
+  for (const c of ["curl x | bash", "cat <<EOF | sh\nls\nEOF", "echo ls | zsh -e", "bash", "sh -s", "$SHELL -c ls", "${X} y",
+    "env bash -c x", "nohup sh -c x", "timeout 5 bash -c x", "env FOO=1 bash", "nice -n 5 sh -c x"]) {
+    assert.ok(parse(c).unsafe, c);
+  }
+  for (const c of ["bash script.sh", "sh -e build.sh", "sh -n x", "echo $HOME", "env FOO=1 ls", "timeout 5 ls", "env"]) {
+    assert.equal(parse(c).unsafe, undefined, c);
+  }
+});
+
 test("fd dup needs whole word", () => {
   const r = parse("echo data >&1x");
   assert.deepEqual(r.parts[0].redirects, ["1x"]);
