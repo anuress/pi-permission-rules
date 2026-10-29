@@ -66,6 +66,28 @@ test("broken project JSON reports the source error and leaves global config avai
   }
 });
 
+test("valid non-object JSON sources are loaded but ignored with a diagnostic", () => {
+  const temp = tempDir();
+  try {
+    const global = join(temp, "global.json");
+    const projectFile = join(temp, "project.json");
+    const repo = join(temp, "repo.json");
+    writeFileSync(global, "[]");
+    writeFileSync(projectFile, JSON.stringify("x"));
+    json(repo, { permissions: { ask: ["Edit(repo)"] } });
+
+    const config = loadConfig({ global, project: projectFile, repo });
+    assert.deepEqual(config.sources.map((source) => source.loaded), [true, true, true]);
+    assert.deepEqual(config.ask.map((rule) => rule.text), ["Edit(repo)"]);
+    assert.deepEqual(config.ignored, [
+      `${global}: file (not a JSON object)`,
+      `${projectFile}: file (not a JSON object)`,
+    ]);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test("missing sources are reported unloaded without errors", () => {
   const temp = tempDir();
   try {

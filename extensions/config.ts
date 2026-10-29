@@ -16,7 +16,7 @@ export type Config = {
 };
 
 type JsonObject = Record<string, unknown>;
-type LoadedSource = { path: string; loaded: boolean; error?: string; value?: JsonObject };
+type LoadedSource = { path: string; loaded: boolean; error?: string; value?: JsonObject; nonObject?: boolean };
 const MODES: Mode[] = ["default", "acceptEdits", "plan"];
 const own = (value: JsonObject, key: string): boolean => Object.prototype.hasOwnProperty.call(value, key);
 const isObject = (value: unknown): value is JsonObject => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -31,7 +31,7 @@ function readSource(path: string): LoadedSource {
   }
   try {
     const value: unknown = JSON.parse(text);
-    return { path, loaded: true, value: isObject(value) ? value : {} };
+    return isObject(value) ? { path, loaded: true, value } : { path, loaded: true, nonObject: true };
   } catch (error) {
     return { path, loaded: false, error: `Invalid JSON in ${path}: ${(error as Error).message}` };
   }
@@ -90,7 +90,11 @@ export function loadConfig(paths: { global: string; project: string; repo: strin
 
   loaded.forEach((source, index) => {
     const value = source.value;
-    if (!source.loaded || !value) return;
+    if (!source.loaded) return;
+    if (!value) {
+      if (source.nonObject) ignored.push(`${source.path}: file (not a JSON object)`);
+      return;
+    }
     const isRepo = index === 2;
     let permissions: JsonObject | undefined;
     if (own(value, "permissions")) {

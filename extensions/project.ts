@@ -15,15 +15,25 @@ function realpathAllowMissing(path: string): string {
 
 export function resolveProject(cwd: string, git: Git): Project {
   const rootOutput = git(["rev-parse", "--show-toplevel"], cwd);
-  const commonOutput = git(["rev-parse", "--git-common-dir"], cwd);
-  if (rootOutput === null || commonOutput === null) {
+  if (rootOutput === null) {
     const root = realpathAllowMissing(cwd);
     return { root, key: root };
   }
 
   const rootPath = isAbsolute(rootOutput) ? rootOutput : resolve(cwd, rootOutput);
   const root = realpathAllowMissing(rootPath);
-  const commonPath = isAbsolute(commonOutput) ? commonOutput : resolve(cwd, commonOutput);
+  let commonOutput = git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd);
+  let commonBase = cwd;
+  if (commonOutput === null) {
+    commonOutput = git(["rev-parse", "--git-common-dir"], cwd);
+    commonBase = realpathAllowMissing(cwd);
+  }
+  if (commonOutput === null) {
+    const fallback = realpathAllowMissing(cwd);
+    return { root: fallback, key: fallback };
+  }
+
+  const commonPath = isAbsolute(commonOutput) ? commonOutput : resolve(commonBase, commonOutput);
   const key = realpathAllowMissing(dirname(commonPath));
   return { root, key };
 }

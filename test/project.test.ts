@@ -100,7 +100,7 @@ test("a failed git command falls back to the real cwd for both identities", () =
     };
     const realCwd = realpathSync(cwd);
     assert.deepEqual(resolveProject(cwd, git), { root: realCwd, key: realCwd });
-    assert.equal(calls.length, 2);
+    assert.equal(calls.length, 3);
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }
@@ -114,5 +114,46 @@ test("relative common-dir output resolves against cwd before finding the key", (
     assert.deepEqual(resolveProject(cwd, git), { root: realCwd, key: realCwd });
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("plain common-dir fallback is resolved against the physical cwd", () => {
+  const temp = tempDir();
+  try {
+    const repo = join(temp, "repo");
+    const nested = join(repo, "nested");
+    const link = join(temp, "link");
+    mkdirSync(nested, { recursive: true });
+    symlinkSync(nested, link);
+    const git: Git = (args) => {
+      if (args[1] === "--show-toplevel") return repo;
+      if (args[1] === "--path-format=absolute") return null;
+      return "../.git";
+    };
+
+    const linkedProject = resolveProject(link, git);
+    assert.equal(linkedProject.root, realpathSync(repo));
+    assert.equal(linkedProject.key, realpathSync(repo));
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("symlinked repository subdirectory resolves absolute common dir correctly", () => {
+  const temp = tempDir();
+  try {
+    const repo = join(temp, "repo");
+    const nested = join(repo, "nested");
+    const link = join(temp, "link");
+    mkdirSync(nested, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: repo });
+    symlinkSync(nested, link);
+
+    const linkedProject = resolveProject(link, runGit);
+    const repoProject = resolveProject(repo, runGit);
+    assert.equal(linkedProject.key, repoProject.key);
+    assert.equal(linkedProject.root, realpathSync(repo));
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
   }
 });
