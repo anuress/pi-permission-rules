@@ -92,6 +92,18 @@ test("spec decision rows: paths, modes, and read/write rules", () => {
   verdict("write", "allow", { path: "a.kt" }, env("acceptEdits", {}, link));
 });
 
+test("tool paths normalize like pi core before physical-path checks", () => {
+  verdict("write", "ask", { path: "~/.ssh/authorized_keys" }, env("acceptEdits"));
+  verdict("write", "ask", { path: "~" }, env("acceptEdits"));
+  verdict("write", "ask", { path: "@/etc/x" }, env("acceptEdits"));
+  verdict("write", "allow", { path: "@src/a.kt" }, env("acceptEdits"));
+  verdict("write", "ask", { path: "@src/a.kt" }, env("acceptEdits", { ask: rules("Edit(src/**)") }));
+  verdict("write", "allow", { path: "src/a\u00a0b.kt" }, env("acceptEdits"));
+  verdict("write", "ask", { path: "src/a\u00a0b.kt" }, env("acceptEdits", { ask: rules("Edit(src/a b.kt)") }));
+  verdict("read", "deny", { path: "~/.ssh/id" }, env("acceptEdits", { deny: rules("Read(~/.ssh/**)") }));
+  verdict("write", "ask", { path: "file:///etc/x" }, env("acceptEdits"));
+});
+
 test("unsafe bash parses ask, plan denies, and matching deny rules still win", () => {
   const normal = verdict("bash", "ask", { command: 'bash -c "echo ok"' });
   assert.equal(normal.flags[0].suggestion, null);

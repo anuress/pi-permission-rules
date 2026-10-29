@@ -1,6 +1,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Config, Mode } from "./config.ts";
 import { isReadOnly, CODE_RUNNERS } from "./readonly.ts";
 import { matchBash, matchPath, type Rule, toolFamily } from "./rules.ts";
@@ -27,6 +28,16 @@ function physical(path: string): string {
 
 function inside(path: string, root: string): boolean {
   return root === "/" ? path.startsWith("/") : path === root || path.startsWith(`${root}/`);
+}
+
+function normalizeToolPath(path: string, cwd: string): { path: string; outside: boolean } {
+  let normalized = path.replace(/[\u00a0\u2000-\u200a\u202f\u205f\u3000]/g, " ");
+  if (normalized.startsWith("@")) normalized = normalized.slice(1);
+  if (normalized === "~") normalized = homedir();
+  else if (normalized.startsWith("~/")) normalized = join(homedir(), normalized.slice(2));
+  else if (normalized.startsWith("~")) return { path: resolve("/", normalized), outside: true };
+  else if (normalized.startsWith("file://")) normalized = fileURLToPath(normalized);
+  return { path: isAbsolute(normalized) ? normalized : resolve(cwd, normalized), outside: false };
 }
 
 function partRule(rules: readonly Rule[], part: Part): Rule | undefined {
@@ -172,8 +183,8 @@ export function decide(call: Call, env: Env): Decision {
   if (family === "Read" || family === "Edit") {
     const path = call.path ?? (family === "Read" && ["grep", "find", "ls"].includes(call.tool) ? env.cwd : "");
     if (!path) return decision(family === "Read" ? "allow" : "ask", family === "Read" ? [] : [flag(call.tool, "no allow rule")]);
-    const unknownTilde = path.startsWith("~") && path[1] !== "/" && path !== "~";
-    return choose([evaluatePath(unknownTilde ? resolve("/", path) : path, family, env, unknownTilde)]);
+    const normalized = normalizeToolPath(path, env.cwd);
+    return choose([evaluatePath(normalized.path, family, env, normalized.outside)]);
   }
 
   const deny = customRule(env.config.deny, call.tool);
