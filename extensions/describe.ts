@@ -1,5 +1,4 @@
-import { basename, isAbsolute, resolve } from "node:path";
-import { homedir } from "node:os";
+import { resolve } from "node:path";
 import { keyFilename } from "./project.ts";
 import { decide, isUnattended, resolveMode, type Env } from "./decide.ts";
 import type { Config, Mode } from "./config.ts";
@@ -53,48 +52,34 @@ export function describe(state: PermissionState): string {
   ].join("\n");
 }
 
-function cdDirectory(part: { argv: string[] }, dir: string | null): string | null {
-  if (basename(part.argv[0] ?? "") !== "cd") return dir;
-  const args = part.argv.slice(1);
-  if (args.length !== 1 || args[0] === "-" || args[0].includes("$")) return null;
-  const target = args[0] === "~" ? homedir()
-    : args[0].startsWith("~/") ? resolve(homedir(), args[0].slice(2))
-      : args[0].startsWith("~") ? null : args[0];
-  if (target === null || (dir === null && !isAbsolute(target))) return null;
-  return resolve(dir ?? "/", target);
-}
-
-function scopeDirectory(scope: string, directories: Map<string, string | null>): string | null {
-  if (directories.has(scope)) return directories.get(scope) ?? null;
-  const parentEnd = scope.lastIndexOf("/");
-  const parent = parentEnd < 0 ? "" : scope.slice(0, parentEnd);
-  const dir = scopeDirectory(parent, directories);
-  directories.set(scope, dir);
-  return dir;
+function flagMatchesTarget(label: string, target: string, cwd: string): boolean {
+  return label === target || label === resolve(cwd, target) || label.endsWith(`/${target}`);
 }
 
 export function explain(command: string, env: Env): string {
   const parsed = parse(command);
+  const decision = decide({ tool: "bash", command }, env);
+  const usedFlags = new Set<number>();
   const rows: string[] = [];
-  const overall = decide({ tool: "bash", command }, env);
-  const directories = new Map<string, string | null>([["", env.cwd]]);
+  const appendItem = (text: string, label: string, target = false): void => {
+    const flagIndex = decision.flags.findIndex((flag, index) =>
+      !usedFlags.has(index) && (target ? flagMatchesTarget(flag.label, label, env.cwd) : flag.label === label),
+    );
+    if (flagIndex < 0) rows.push(`${text} → allow`);
+    else {
+      usedFlags.add(flagIndex);
+      rows.push(`${text} → not allowed (${decision.flags[flagIndex].rule})`);
+    }
+  };
 
   for (const part of parsed.parts) {
-    const dir = scopeDirectory(part.scope, directories);
-    const localEnv = { ...env, cwd: dir ?? "/" };
-    if (part.text) {
-      const decision = decide({ tool: "bash", command: part.text }, localEnv);
-      rows.push(`${part.text} → ${decision.verdict} (${decision.flags[0]?.rule ?? "allowed"})`);
-    }
-    for (const target of part.redirects) {
-      const decision = decide({ tool: "write", path: target }, localEnv);
-      rows.push(`redirect ${target} → ${decision.verdict} (${decision.flags[0]?.rule ?? "allowed"})`);
-    }
-    directories.set(part.scope, cdDirectory(part, dir));
+    if (part.text) appendItem(part.text, part.text);
+    for (const target of part.redirects) appendItem(`redirect ${target}`, target, true);
   }
-
-  if (parsed.unsafe !== undefined) rows.push(`unsafe parse: ${parsed.unsafe} (${overall.verdict})`);
-  if (rows.length === 0) rows.push(`${command || "<empty>"} → ${overall.verdict} (${overall.flags[0]?.rule ?? "allowed"})`);
-  rows.push(`Overall: ${overall.verdict}`);
+  decision.flags.forEach((flag, index) => {
+    if (!usedFlags.has(index)) rows.push(`${flag.label} → not allowed (${flag.rule})`);
+  });
+  if (rows.length === 0) rows.push(`${command || "<empty>"} → ${decision.verdict === "allow" ? "allow" : `not allowed (${decision.flags[0]?.rule ?? "unknown"})`}`);
+  rows.push(`Overall: ${decision.verdict}`);
   return rows.join("\n");
 }

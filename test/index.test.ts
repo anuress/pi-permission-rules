@@ -89,6 +89,8 @@ test("persistent approval writes only the agent permission file", async () => {
     ui.answers.push("Yes, and don't ask again for Bash(git push:*) in this project");
     const result = await handlers.get("tool_call")!({ toolName: "bash", input: { command: "git push origin main" } }, ctx);
     assert.equal(result, undefined);
+    assert.equal(await handlers.get("tool_call")!({ toolName: "bash", input: { command: "git push origin main" } }, ctx), undefined);
+    assert.equal(ui.selectCalls.length, 1);
 
     assert.deepEqual(ui.selectCalls[0].options, [
       "Yes", "Yes, and don't ask again for Bash(git push:*) in this project", "No, and tell pi what to do differently",
@@ -114,6 +116,75 @@ test("hook catches errors from decision evaluation and fails closed", async () =
     } finally {
       Array.prototype.find = original;
     }
+  });
+});
+
+test("session approval switches to acceptEdits for later in-root writes", async () => {
+  await withEnv({ PI_PERMISSIONS_MODE: "default" }, async () => {
+    const { root, handlers, ctx, ui } = setup();
+    await handlers.get("session_start")!({}, ctx);
+    ui.answers.push("Yes, allow all edits during this session");
+    assert.equal(await handlers.get("tool_call")!({ toolName: "write", input: { path: "src/one.txt" } }, ctx), undefined);
+    assert.equal(await handlers.get("tool_call")!({ toolName: "write", input: { path: "src/two.txt" } }, ctx), undefined);
+    assert.equal(ui.selectCalls.length, 1);
+    assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" }), "");
+  });
+});
+
+test("persistent grant write errors notify but still allow the chosen call", async () => {
+  await withEnv({}, async () => {
+    const { root, agent, handlers, ctx, ui } = setup();
+    const projectFile = join(agent, "permissions", keyFilename(realpathSync(root)));
+    mkdirSync(join(agent, "permissions"), { recursive: true });
+    writeFileSync(projectFile, "{");
+    await handlers.get("session_start")!({}, ctx);
+    ui.answers.push("Yes, and don't ask again for Bash(git push:*) in this project");
+    const result = await handlers.get("tool_call")!({ toolName: "bash", input: { command: "git push origin main" } }, ctx);
+    assert.equal(result, undefined);
+    assert.ok(ui.notifications.some(({ level, message }) => level === "error" && message.includes("Unable to save permission grant")));
+  });
+});
+
+test("PI_PERMISSIONS_UNATTENDED blocks asks without opening UI", async () => {
+  await withEnv({ PI_PERMISSIONS_UNATTENDED: "1" }, async () => {
+    const { handlers, ctx, ui } = setup();
+    await handlers.get("session_start")!({}, ctx);
+    const result = await handlers.get("tool_call")!({ toolName: "bash", input: { command: "git push" } }, ctx);
+    assert.deepEqual(result, {
+      block: true,
+      reason: "permission: `git push` needs approval (no allow rule). It was not run. Use a read-only alternative, or report that this step needs the orchestrator.",
+    });
+    assert.equal(ui.selectCalls.length, 0);
+  });
+});
+
+test("missing and non-string bash commands fail closed rather than allowing", async () => {
+  await withEnv({}, async () => {
+    const { handlers, ctx, ui } = setup();
+    await handlers.get("session_start")!({}, ctx);
+    for (const input of [{}, { command: 17 }]) {
+      const result = await handlers.get("tool_call")!({ toolName: "bash", input }, ctx);
+      assert.notEqual(result, undefined);
+    }
+    assert.equal(ui.selectCalls.length, 2);
+  });
+});
+
+test("session grants do not override a matching deny rule", async () => {
+  await withEnv({}, async () => {
+    const { root, agent, handlers, ctx, ui } = setup();
+    mkdirSync(agent, { recursive: true });
+    writeFileSync(join(agent, "permissions.json"), JSON.stringify({ permissions: { deny: ["Bash(git push:*)"] } }));
+    await handlers.get("session_start")!({}, ctx);
+    ui.answers.push("Yes, and don't ask again for Bash(git:*) in this project");
+    assert.equal(await handlers.get("tool_call")!({ toolName: "bash", input: { command: "git" } }, ctx), undefined);
+    const denied = await handlers.get("tool_call")!({ toolName: "bash", input: { command: "git push origin main" } }, ctx);
+    assert.deepEqual(denied, {
+      block: true,
+      reason: "permission: `git push origin main` is denied (Bash(git push:*)). It was not run. Use a read-only alternative, or report that this step needs the orchestrator.",
+    });
+    assert.equal(ui.selectCalls.length, 1);
+    assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" }), "");
   });
 });
 
@@ -164,7 +235,7 @@ test("permissions command describes, tests without running, and switches session
     assert.match(ui.notifications.at(-1)!.message, new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     await command!("test git status && git push", ctx);
     assert.match(ui.notifications.at(-1)!.message, /git status.*allow/i);
-    assert.match(ui.notifications.at(-1)!.message, /git push.*ask/i);
+    assert.match(ui.notifications.at(-1)!.message, /git push.*not allowed.*no allow rule/i);
     await command!("mode plan", ctx);
     assert.match(ui.notifications.at(-1)!.message, /plan/i);
     await command!("mode invalid", ctx);

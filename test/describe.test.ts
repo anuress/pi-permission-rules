@@ -47,7 +47,7 @@ test("explain gives a verdict and matching rule for each shell part", () => {
   const output = explain("git status && git push", env);
 
   assert.match(output, /git status.*allow/i);
-  assert.match(output, /git push.*ask.*no allow rule/i);
+  assert.match(output, /git push.*not allowed.*no allow rule/i);
   assert.match(output, /overall.*ask/i);
   assert.equal(parse("git status && git push").parts.length, 2);
 });
@@ -59,17 +59,25 @@ test("explain includes redirect targets and fails closed on unsafe parses", () =
   const config = loadConfig({ global: join(temp, "missing-global.json"), project: join(temp, "missing-project.json"), repo: join(root, ".pi", "permissions.json") });
   const env = { root, cwd: root, mode: "default" as const, config, session: [] };
 
-  assert.match(explain("echo x > out", env), /redirect out.*ask.*no allow rule/i);
-  assert.match(explain("echo 'unterminated", env), /unsafe.*unterminated/i);
+  assert.match(explain("echo x > out", env), /redirect out.*not allowed.*no allow rule/i);
+  const variableRedirect = explain("echo x > $OUT", env);
+  assert.match(variableRedirect, /redirect \$OUT.*not allowed/);
+  assert.match(variableRedirect, /Overall: ask/);
+  assert.match(explain("echo 'unterminated", env), /unterminated.*not allowed/i);
 });
 
-test("explain resolves redirect targets against preceding cd commands", () => {
-  const temp = mkdtempSync(join(tmpdir(), "ppr-explain-cd-"));
+test("explain displays quoted separators as a single part using the full decision", () => {
+  const temp = mkdtempSync(join(tmpdir(), "ppr-explain-quoted-"));
   const root = join(temp, "repo");
-  mkdirSync(join(root, "sub"), { recursive: true });
-  const config = loadConfig({ global: join(temp, "missing-global.json"), project: join(temp, "missing-project.json"), repo: join(root, ".pi", "permissions.json") });
-  const env = { root, cwd: root, mode: "acceptEdits" as const, config, session: [] };
+  mkdirSync(root);
+  const global = join(temp, "global.json");
+  writeFileSync(global, JSON.stringify({ permissions: { allow: ["Bash(echo a; b)"] } }));
+  const config = loadConfig({ global, project: join(temp, "missing-project.json"), repo: join(root, ".pi", "permissions.json") });
+  const env = { root, cwd: root, mode: "default" as const, config, session: [] };
+  const output = explain('echo "a; b"', env);
 
-  assert.match(explain("cd sub && echo x > out", env), /redirect out → allow/);
-  assert.match(explain("cd \/etc && echo x > hosts", env), /redirect hosts → ask/);
+  assert.equal(parse('echo "a; b"').parts.length, 1);
+  assert.match(output, /echo a; b → allow/);
+  assert.match(output, /Overall: allow/);
+  assert.doesNotMatch(output, /not allowed|Overall: ask/);
 });
