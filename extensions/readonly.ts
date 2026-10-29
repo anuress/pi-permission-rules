@@ -8,7 +8,7 @@ const READ_ONLY_COMMANDS = new Set([
 
 const READ_ONLY_GIT_COMMANDS = new Set([
   "status", "log", "show", "diff", "blame", "rev-parse", "ls-files", "ls-tree", "grep",
-  "merge-base", "cat-file", "describe", "shortlog", "reflog",
+  "merge-base", "cat-file", "describe", "shortlog",
 ]);
 
 export const CODE_RUNNERS: ReadonlySet<string> = new Set([
@@ -116,7 +116,14 @@ function dateIsReadOnly(args: string[]): boolean {
       }
       continue;
     }
-    if (arg === "-s" || (arg.startsWith("-s") && arg !== "--")) return false;
+    if (arg.startsWith("-") && arg !== "-") {
+      for (let j = 1; j < arg.length; j++) {
+        const option = arg[j];
+        if (option === "s") return false;
+        // These consume the remainder of a short-option cluster as their value.
+        if (option === "d" || option === "f" || option === "r" || option === "I") break;
+      }
+    }
   }
   return true;
 }
@@ -144,7 +151,19 @@ function fileIsReadOnly(args: string[]): boolean {
         if (args[i + 1] === undefined || args[i + 1].startsWith("--")) return false;
         i++;
       }
-    } else if (arg.startsWith("-") && arg !== "-" && arg.slice(1).includes("C")) return false;
+    } else if (arg.startsWith("-") && arg !== "-") {
+      for (let j = 1; j < arg.length; j++) {
+        const option = arg[j];
+        if (option === "C") return false;
+        if ("mfeFP".includes(option)) {
+          if (j + 1 === arg.length) {
+            if (args[i + 1] === undefined) return false;
+            i++;
+          }
+          break;
+        }
+      }
+    }
   }
   return true;
 }
@@ -201,7 +220,8 @@ const SED_SAFE_LONG_OPTIONS = new Set([
   "--quiet", "--silent", "--regexp-extended", "--posix", "--null-data", "--zero-terminated",
   "--separate", "--debug", "--sandbox", "--expression",
 ]);
-const SED_NO_ARGUMENT_OPTIONS = new Set(["-n", "-E", "-r", "-u", "-s", "-z"]);
+const SED_NO_ARGUMENT_OPTIONS = new Set(["n", "E", "r", "u", "s", "z"]);
+const SED_VALUE_OPTIONS = new Set(["e", "l"]);
 
 function sedIsReadOnly(args: string[]): boolean {
   const scripts: string[] = [];
@@ -224,21 +244,23 @@ function sedIsReadOnly(args: string[]): boolean {
       }
       continue;
     }
-    if (options && (arg === "-i" || arg.startsWith("-i"))) return false;
-    if (options && (arg === "-f" || arg.startsWith("-f") || arg === "--file" || arg.startsWith("--file="))) return false;
-    if (options && arg === "-e") {
-      if (args[i + 1] === undefined) return false;
-      scripts.push(args[++i]);
-      hasExplicitScript = true;
+    if (options && arg.startsWith("-") && arg !== "-") {
+      for (let j = 1; j < arg.length; j++) {
+        const option = arg[j];
+        if (option === "i" || option === "f") return false;
+        if (SED_VALUE_OPTIONS.has(option)) {
+          const value = j + 1 < arg.length ? arg.slice(j + 1) : args[++i];
+          if (value === undefined) return false;
+          if (option === "e") {
+            scripts.push(value);
+            hasExplicitScript = true;
+          }
+          break;
+        }
+        if (!SED_NO_ARGUMENT_OPTIONS.has(option)) return false;
+      }
       continue;
     }
-    if (options && arg.startsWith("-e") && arg.length > 2) {
-      scripts.push(arg.slice(2));
-      hasExplicitScript = true;
-      continue;
-    }
-    if (options && SED_NO_ARGUMENT_OPTIONS.has(arg)) continue;
-    if (options && arg.startsWith("-")) return false;
     if (!hasExplicitScript) {
       scripts.push(arg);
       hasExplicitScript = true;
@@ -370,6 +392,7 @@ function gitIsReadOnly(args: string[]): boolean {
 
   const [subcommand, ...rest] = args.slice(i);
   if (hasUnsafeGitReadOption(rest)) return false;
+  if (subcommand === "reflog") return reflogIsReadOnly(rest);
   if (READ_ONLY_GIT_COMMANDS.has(subcommand)) {
     return subcommand !== "grep" || !rest.some((arg) => arg === "-O" || arg.startsWith("-O")
       || arg === "--open-files-in-pager" || arg.startsWith("--open-files-in-pager="));
@@ -379,6 +402,11 @@ function gitIsReadOnly(args: string[]): boolean {
   if (subcommand === "stash") return rest.length === 1 && rest[0] === "list";
   if (subcommand === "config") return gitConfigIsReadOnly(rest);
   return false;
+}
+
+function reflogIsReadOnly(args: string[]): boolean {
+  const [subcommand] = args;
+  return !["expire", "delete", "drop", "exists"].includes(subcommand ?? "");
 }
 
 function branchIsReadOnly(args: string[]): boolean {
