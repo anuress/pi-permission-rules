@@ -76,6 +76,41 @@ test("spec decision rows: read-only commands, heredoc redirects, and shell parts
   verdict("bash", "deny", { command: "./gradlew test" }, env("plan", { allow: rules("Bash(./gradlew *)") }));
 });
 
+test("decision items explain each evaluated part and resolved redirect", () => {
+  const decision = verdict("bash", "ask", { command: "ls > /etc/hosts" }, env("acceptEdits"));
+  assert.deepEqual(decision.items, [
+    { kind: "part", label: "ls", verdict: "allow", rule: "allowed: read-only" },
+    { kind: "redirect", label: realpathSync("/etc/hosts"), verdict: "ask", rule: "no allow rule" },
+  ]);
+
+  const compound = verdict("bash", "ask", { command: "git status && git push" });
+  assert.deepEqual(compound.items, [
+    { kind: "part", label: "git status", verdict: "allow", rule: "allowed: read-only" },
+    { kind: "part", label: "git push", verdict: "ask", rule: "no allow rule" },
+  ]);
+});
+
+test("decision items identify path, custom tool, and unsafe bash evaluations", () => {
+  const write = verdict("write", "ask", { path: "src/a.kt" });
+  assert.deepEqual(write.items, [
+    { kind: "path", label: join(root, "src/a.kt"), verdict: "ask", rule: "no allow rule" },
+  ]);
+  const custom = verdict("web_search", "allow");
+  assert.deepEqual(custom.items, [
+    { kind: "tool", label: "web_search", verdict: "allow", rule: "allowed: custom tool" },
+  ]);
+  const read = verdict("read", "allow", { path: "../sibling/file" });
+  assert.deepEqual(read.items[0], { kind: "path", label: join(realpathSync(sibling), "file"), verdict: "allow", rule: "allowed: read tool" });
+  const configured = verdict("write", "allow", { path: "src/a.kt" }, env("default", { allow: rules("Edit(src/**)") }));
+  assert.equal(configured.items[0].rule, "allowed: allow rule Edit(src/**)");
+  const session = verdict("write", "allow", { path: "src/a.kt" }, { ...env(), session: rules("Edit(src/a.kt)") });
+  assert.equal(session.items[0].rule, "allowed: session rule Edit(src/a.kt)");
+  const inRoot = verdict("write", "allow", { path: "src/new.kt" }, env("acceptEdits"));
+  assert.equal(inRoot.items[0].rule, "allowed: inside project root");
+  const unsafe = verdict("bash", "ask", { command: "echo 'unterminated" });
+  assert.ok(unsafe.items.some((item) => item.kind === "tool" && item.label === "echo 'unterminated" && item.verdict === "ask"));
+});
+
 test("spec decision rows: paths, modes, and read/write rules", () => {
   verdict("write", "deny", { path: "src/a.kt" }, env("plan"));
   verdict("write", "allow", { path: "src/a.kt" }, env("acceptEdits"));
@@ -241,5 +276,5 @@ test("toBlock uses the exact unattended approval message", () => {
     block: true,
     reason: "permission: `git push origin x` is denied (Bash(git push:*)). It was not run. Use a read-only alternative, or report that this step needs the orchestrator.",
   });
-  assert.deepEqual(toBlock({ verdict: "allow", flags: [], reason: "" }), { block: true, reason: "" });
+  assert.deepEqual(toBlock({ verdict: "allow", flags: [], reason: "", items: [] }), { block: true, reason: "" });
 });

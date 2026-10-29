@@ -59,6 +59,7 @@ function syntheticDecision(verdict: "ask" | "deny", label: string, rule: string)
     verdict,
     flags: [{ label, rule, suggestion: null }],
     reason: `permission: \`${label}\` ${verdict === "deny" ? "is denied" : "needs approval"} (${rule}). It was not run. Use a read-only alternative, or report that this step needs the orchestrator.`,
+    items: [{ kind: "tool", label, verdict, rule }],
   };
 }
 

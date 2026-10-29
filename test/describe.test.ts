@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, explain, type PermissionState } from "../extensions/describe.ts";
@@ -46,8 +46,8 @@ test("explain gives a verdict and matching rule for each shell part", () => {
   const env = { root, cwd: root, mode: resolveMode({}, config).mode, config, session: [] };
   const output = explain("git status && git push", env);
 
-  assert.match(output, /git status.*allow/i);
-  assert.match(output, /git push.*not allowed.*no allow rule/i);
+  assert.match(output, /part git status → allow \(allowed: read-only\)/i);
+  assert.match(output, /part git push → ask \(no allow rule\)/i);
   assert.match(output, /overall.*ask/i);
   assert.equal(parse("git status && git push").parts.length, 2);
 });
@@ -59,11 +59,24 @@ test("explain includes redirect targets and fails closed on unsafe parses", () =
   const config = loadConfig({ global: join(temp, "missing-global.json"), project: join(temp, "missing-project.json"), repo: join(root, ".pi", "permissions.json") });
   const env = { root, cwd: root, mode: "default" as const, config, session: [] };
 
-  assert.match(explain("echo x > out", env), /redirect out.*not allowed.*no allow rule/i);
+  assert.match(explain("echo x > out", env), /redirect .*\/out → ask \(no allow rule\)/i);
   const variableRedirect = explain("echo x > $OUT", env);
-  assert.match(variableRedirect, /redirect \$OUT.*not allowed/);
+  assert.match(variableRedirect, /redirect \/\$OUT → ask \(no allow rule\)/);
   assert.match(variableRedirect, /Overall: ask/);
-  assert.match(explain("echo 'unterminated", env), /unterminated.*not allowed/i);
+  assert.match(explain("echo 'unterminated", env), /tool echo 'unterminated → ask \(unparsed:/i);
+});
+
+test("explain uses each item recorded by one full decision with resolved redirects", () => {
+  const temp = mkdtempSync(join(tmpdir(), "ppr-explain-resolved-"));
+  const root = join(temp, "repo");
+  mkdirSync(root);
+  const config = loadConfig({ global: join(temp, "missing-global.json"), project: join(temp, "missing-project.json"), repo: join(root, ".pi", "permissions.json") });
+  const env = { root, cwd: root, mode: "acceptEdits" as const, config, session: [] };
+  const output = explain("ls > /etc/hosts", env);
+
+  assert.match(output, /part ls → allow \(allowed: read-only\)/);
+  assert.match(output, new RegExp(`redirect ${realpathSync("/etc/hosts")} → ask \\(no allow rule\\)`));
+  assert.match(output, /Overall: ask/);
 });
 
 test("explain displays quoted separators as a single part using the full decision", () => {
@@ -77,7 +90,7 @@ test("explain displays quoted separators as a single part using the full decisio
   const output = explain('echo "a; b"', env);
 
   assert.equal(parse('echo "a; b"').parts.length, 1);
-  assert.match(output, /echo a; b → allow/);
+  assert.match(output, /part echo a; b → allow \(allowed: allow rule Bash\(echo a; b\)\)/);
   assert.match(output, /Overall: allow/);
   assert.doesNotMatch(output, /not allowed|Overall: ask/);
 });

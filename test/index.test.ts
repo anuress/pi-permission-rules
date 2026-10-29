@@ -235,7 +235,7 @@ test("permissions command describes, tests without running, and switches session
     assert.match(ui.notifications.at(-1)!.message, new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     await command!("test git status && git push", ctx);
     assert.match(ui.notifications.at(-1)!.message, /git status.*allow/i);
-    assert.match(ui.notifications.at(-1)!.message, /git push.*not allowed.*no allow rule/i);
+    assert.match(ui.notifications.at(-1)!.message, /part git push → ask \(no allow rule\)/i);
     await command!("mode plan", ctx);
     assert.match(ui.notifications.at(-1)!.message, /plan/i);
     await command!("mode invalid", ctx);

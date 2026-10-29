@@ -10,10 +10,16 @@ import { parse, type Part } from "./shell.ts";
 export type Call = { tool: string; command?: string; path?: string };
 export type Env = { root: string; cwd: string; mode: Mode; config: Config; session: Rule[] };
 export type Flag = { label: string; rule: string; suggestion: string | null };
-export type Decision = { verdict: "allow" | "ask" | "deny"; flags: Flag[]; reason: string };
+export type DecisionItem = {
+  kind: "part" | "redirect" | "path" | "tool";
+  label: string;
+  verdict: "allow" | "ask" | "deny";
+  rule: string;
+};
+export type Decision = { verdict: "allow" | "ask" | "deny"; flags: Flag[]; reason: string; items: DecisionItem[] };
 
 type Verdict = Decision["verdict"];
-type Evaluation = { verdict: Verdict; flag?: Flag };
+type Evaluation = { verdict: Verdict; flag?: Flag; item: DecisionItem };
 
 const MODES: readonly Mode[] = ["default", "acceptEdits", "plan"];
 const DANGEROUS_ASSIGNMENT = /^(?:LD_.*|DYLD_.*|GIT_.*|SSH_.*|PATH|PAGER|.*_PAGER|EDITOR|VISUAL|LESSOPEN|LESSCLOSE|BASH_ENV|ENV|NODE_OPTIONS|NODE_PATH|PYTHON.*|PERL5.*|RUBYOPT|RUBYLIB|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|.*_OPTS|PROMPT_COMMAND|IFS|SHELLOPTS|BASHOPTS)$/;
@@ -56,11 +62,19 @@ function flag(label: string, rule: string, suggestion: string | null = null): Fl
   return { label, rule, suggestion };
 }
 
-function decision(verdict: Verdict, flags: Flag[] = [], reasonFlag = flags[0]): Decision {
+function decision(verdict: Verdict, flags: Flag[] = [], reasonFlag = flags[0], items: DecisionItem[] = []): Decision {
   const reason = reasonFlag && verdict !== "allow"
     ? `permission: \`${reasonFlag.label}\` ${verdict === "deny" ? "is denied" : "needs approval"} (${reasonFlag.rule}). It was not run. Use a read-only alternative, or report that this step needs the orchestrator.`
     : "";
-  return { verdict, flags, reason };
+  return { verdict, flags, reason, items };
+}
+
+function evaluated(kind: DecisionItem["kind"], label: string, verdict: Verdict, rule: string, suggestion: string | null = null): Evaluation {
+  return {
+    verdict,
+    ...(verdict === "allow" ? {} : { flag: flag(label, rule, suggestion) }),
+    item: { kind, label, verdict, rule: verdict === "allow" ? `allowed: ${rule}` : rule },
+  };
 }
 
 function choose(evaluations: Evaluation[]): Decision {
@@ -70,25 +84,28 @@ function choose(evaluations: Evaluation[]): Decision {
       ? evaluation.verdict
       : worst, "allow");
   const reasonFlag = evaluations.find((evaluation) => evaluation.verdict === verdict)?.flag ?? flags[0];
-  return decision(verdict, flags, reasonFlag);
+  return decision(verdict, flags, reasonFlag, evaluations.map((evaluation) => evaluation.item));
 }
 
-function evaluatePath(path: string, family: "Read" | "Edit", env: Env, outside = false): Evaluation {
+function evaluatePath(path: string, family: "Read" | "Edit", env: Env, outside = false, kind: "path" | "redirect" = "path"): Evaluation {
   const absolute = physical(resolve(env.cwd, path));
   const root = physical(env.root);
-  const label = absolute;
   const deny = pathRule(env.config.deny, family, absolute, root);
-  if (deny) return { verdict: "deny", flag: flag(label, deny.text) };
+  if (deny) return evaluated(kind, absolute, "deny", deny.text);
 
-  if (family === "Edit" && env.mode === "plan") return { verdict: "deny", flag: flag(label, "plan mode") };
+  if (family === "Edit" && env.mode === "plan") return evaluated(kind, absolute, "deny", "plan mode");
   const ask = pathRule(env.config.ask, family, absolute, root);
-  if (ask) return { verdict: "ask", flag: flag(label, ask.text) };
-  if (family === "Read") return { verdict: "allow" };
+  if (ask) return evaluated(kind, absolute, "ask", ask.text);
+  if (family === "Read") return evaluated(kind, absolute, "allow", "read tool");
 
-  const allow = pathRule([...env.config.allow, ...env.session], family, absolute, root);
-  if (allow) return { verdict: "allow" };
-  if (env.mode === "acceptEdits" && !outside && inside(absolute, root)) return { verdict: "allow" };
-  return { verdict: "ask", flag: flag(label, "no allow rule") };
+  const allow = pathRule(env.config.allow, family, absolute, root);
+  if (allow) return evaluated(kind, absolute, "allow", `allow rule ${allow.text}`);
+  const session = pathRule(env.session, family, absolute, root);
+  if (session) return evaluated(kind, absolute, "allow", `session rule ${session.text}`);
+  if (env.mode === "acceptEdits" && !outside && inside(absolute, root)) {
+    return evaluated(kind, absolute, "allow", "inside project root");
+  }
+  return evaluated(kind, absolute, "ask", "no allow rule");
 }
 
 function dangerousAssignment(part: Part): string | undefined {
@@ -100,21 +117,23 @@ function dangerousAssignment(part: Part): string | undefined {
 }
 
 function evaluatePart(part: Part, env: Env): Evaluation {
-  if (part.argv.length === 0) return { verdict: "allow" };
+  if (part.argv.length === 0) return evaluated("part", part.text, "allow", "empty command part");
   if (env.mode === "plan" && !isReadOnly(part, env.config.readOnlyCommands)) {
-    return { verdict: "deny", flag: flag(part.text, "plan mode") };
+    return evaluated("part", part.text, "deny", "plan mode");
   }
   const deny = partRule(env.config.deny, part);
-  if (deny) return { verdict: "deny", flag: flag(part.text, deny.text) };
+  if (deny) return evaluated("part", part.text, "deny", deny.text);
   const ask = partRule(env.config.ask, part);
-  if (ask) return { verdict: "ask", flag: flag(part.text, ask.text) };
+  if (ask) return evaluated("part", part.text, "ask", ask.text);
 
   const unsafeAssignment = dangerousAssignment(part);
-  if (unsafeAssignment) return { verdict: "ask", flag: flag(part.text, `dangerous env ${unsafeAssignment}`) };
-  if (partRule([...env.config.allow, ...env.session], part) || isReadOnly(part, env.config.readOnlyCommands)) {
-    return { verdict: "allow" };
-  }
-  return { verdict: "ask", flag: flag(part.text, "no allow rule", suggestRule(part)) };
+  if (unsafeAssignment) return evaluated("part", part.text, "ask", `dangerous env ${unsafeAssignment}`);
+  const allow = partRule(env.config.allow, part);
+  if (allow) return evaluated("part", part.text, "allow", `allow rule ${allow.text}`);
+  const session = partRule(env.session, part);
+  if (session) return evaluated("part", part.text, "allow", `session rule ${session.text}`);
+  if (isReadOnly(part, env.config.readOnlyCommands)) return evaluated("part", part.text, "allow", "read-only");
+  return evaluated("part", part.text, "ask", "no allow rule", suggestRule(part));
 }
 
 function homePath(path: string): string | null {
@@ -146,7 +165,8 @@ function evaluateBash(call: Call, env: Env): Decision {
   const command = call.command ?? "";
   const parsed = parse(command);
   if (parsed.parts.length === 0 && parsed.unsafe === undefined) {
-    return decision("ask", [flag(command, "unparsed: empty command")]);
+    const empty = evaluated("tool", command, "ask", "unparsed: empty command");
+    return decision("ask", [empty.flag!], empty.flag, [empty.item]);
   }
 
   const dirs = new Map<string, string | null>([["", physical(env.cwd)]]);
@@ -164,16 +184,18 @@ function evaluateBash(call: Call, env: Env): Decision {
     evaluations.push(evaluatePart(part, env));
     for (const target of part.redirects) {
       const targetPath = redirectPath(target, dir);
-      evaluations.push(evaluatePath(targetPath.path, "Edit", { ...env, cwd: "/" }, targetPath.outside));
+      evaluations.push(evaluatePath(targetPath.path, "Edit", { ...env, cwd: "/" }, targetPath.outside, "redirect"));
     }
     if (basename(part.argv[0] ?? "") === "cd") dirs.set(part.scope, cdDirectory(part, dir));
   }
 
-  if (evaluations.some((result) => result.verdict === "deny")) return choose(evaluations);
-  if (parsed.unsafe !== undefined) {
-    if (env.mode === "plan") return decision("deny", [flag(command, "plan mode")]);
-    return decision("ask", [flag(command, `unparsed: ${parsed.unsafe}`)]);
+  const unsafe = parsed.unsafe === undefined ? undefined
+    : evaluated("tool", command, env.mode === "plan" ? "deny" : "ask", env.mode === "plan" ? "plan mode" : `unparsed: ${parsed.unsafe}`);
+  if (evaluations.some((result) => result.verdict === "deny")) {
+    const chosen = choose(evaluations);
+    return unsafe ? { ...chosen, items: [...chosen.items, unsafe.item] } : chosen;
   }
+  if (unsafe) return decision(unsafe.verdict, [unsafe.flag!], unsafe.flag, [...evaluations.map((evaluation) => evaluation.item), unsafe.item]);
   return choose(evaluations);
 }
 
@@ -182,16 +204,19 @@ export function decide(call: Call, env: Env): Decision {
   if (family === "Bash") return evaluateBash(call, env);
   if (family === "Read" || family === "Edit") {
     const path = call.path ?? (family === "Read" && ["grep", "find", "ls"].includes(call.tool) ? env.cwd : "");
-    if (!path) return decision(family === "Read" ? "allow" : "ask", family === "Read" ? [] : [flag(call.tool, "no allow rule")]);
+    if (!path) {
+      const evaluation = evaluated("path", call.tool, family === "Read" ? "allow" : "ask", family === "Read" ? "read tool" : "no allow rule");
+      return choose([evaluation]);
+    }
     const normalized = normalizeToolPath(path, env.cwd);
     return choose([evaluatePath(normalized.path, family, env, normalized.outside)]);
   }
 
   const deny = customRule(env.config.deny, call.tool);
-  if (deny) return decision("deny", [flag(call.tool, deny.text)]);
+  if (deny) return choose([evaluated("tool", call.tool, "deny", deny.text)]);
   const ask = customRule(env.config.ask, call.tool);
-  if (ask) return decision("ask", [flag(call.tool, ask.text)]);
-  return decision("allow");
+  if (ask) return choose([evaluated("tool", call.tool, "ask", ask.text)]);
+  return choose([evaluated("tool", call.tool, "allow", "custom tool")]);
 }
 
 export function suggestRule(part: Part): string | null {

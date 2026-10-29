@@ -34,6 +34,7 @@ function decision(...suggestions: (string | null)[]): Decision {
       suggestion,
     })),
     reason: "",
+    items: [],
   };
 }
 
@@ -132,7 +133,7 @@ test("single Yes allows once", async () => {
 
 test("title formats no-rule and multiple flags", async () => {
   const { ui, calls } = fakeUi("Yes");
-  const d: Decision = { verdict: "ask", flags: [{ label: "git push", rule: "no allow rule", suggestion: null }, { label: "out", rule: "Edit(out)", suggestion: null }], reason: "" };
+  const d: Decision = { verdict: "ask", flags: [{ label: "git push", rule: "no allow rule", suggestion: null }, { label: "out", rule: "Edit(out)", suggestion: null }], reason: "", items: [] };
   await ask(ui, { tool: "bash" } satisfies Call, d, "default" satisfies Mode);
   assert.equal(calls[0].title, "Permission needed: bash\n- git push (no allow rule)\n- out (Edit(out))");
 });
