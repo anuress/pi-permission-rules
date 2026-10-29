@@ -405,8 +405,8 @@ function gitIsReadOnly(args: string[]): boolean {
 }
 
 function reflogIsReadOnly(args: string[]): boolean {
-  const [subcommand] = args;
-  return !["expire", "delete", "drop", "exists"].includes(subcommand ?? "");
+  const unsafeSubcommands = new Set(["expire", "delete", "drop", "exists"]);
+  return !args.some((arg) => arg === "--" || unsafeSubcommands.has(arg));
 }
 
 function branchIsReadOnly(args: string[]): boolean {
