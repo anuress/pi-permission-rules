@@ -1,0 +1,12 @@
+{
+  "name": "pi-permission-rules",
+  "version": "0.1.0",
+  "description": "Claude Code style permission rules for pi tool calls.",
+  "keywords": ["pi-package", "pi"],
+  "license": "MIT",
+  "author": "Ahmad Nur Salim",
+  "type": "module",
+  "scripts": { "test": "node --test test/" },
+  "pi": { "extensions": ["./extensions/index.ts"] },
+  "peerDependencies": { "@earendil-works/pi-coding-agent": "*" }
+}
