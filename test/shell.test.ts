@@ -130,6 +130,15 @@ test("for and select headers are control syntax but substitutions remain visible
   assert.ok(parse("for ((i=0;i<3;i++)); do echo $i; done").unsafe);
   assert.ok(parse("for f in ${x:=value}; do echo x; done").unsafe);
   assert.equal(parse("for ((1;2;3)); do echo x; done").unsafe, undefined);
+  assert.deepEqual(texts("for f do rm \"$f\"; done"), ["rm $f"]);
+  assert.deepEqual(texts("for f; do rm \"$f\"; done"), ["rm $f"]);
+  assert.deepEqual(texts("for f in a; { rm x; }"), ["rm x"]);
+  assert.equal(parse("for f in a; echo hi").unsafe, "malformed for/select header");
+  assert.equal(parse('for f in a; "do"; rm x').unsafe, "malformed for/select header");
+  assert.deepEqual(texts("for f in a; echo do; rm x"), ["echo do", "rm x"]);
+  assert.ok(parse("for f in a b c do rm x; done").unsafe);
+  assert.equal(parse("for f in a; for g in b; do rm x; done").unsafe, "malformed for/select header");
+  assert.equal(parse("for f in a").unsafe, "malformed for/select header");
 });
 
 test("case patterns are control syntax and branch commands remain visible", () => {

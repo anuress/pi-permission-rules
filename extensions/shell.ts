@@ -67,7 +67,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
   let mode: Mode = null;
   let hdStrip = false;
   let depth = 0;
-  let loopHeader = false;
+  let loopHeader: { phase: "name" | "after-name" | "words" | "body"; keyword: "for" | "select" } | undefined;
   let compoundEndPending = false;
   let compoundRedirect = false;
   const cases: { phase: "subject" | "patterns" | "body"; patternStarted: boolean }[] = [];
@@ -94,36 +94,59 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
       const atStart = argv.length === 0;
       const controlStart = atStart && assignments.length === 0;
       const caseState = cases[cases.length - 1];
-      if (controlStart && !quoted && (w === "for" || w === "select")) {
-        loopHeader = true;
+      let handled = false;
+      if (loopHeader && atStart) {
+        if (loopHeader.phase === "name" && !quoted && /^[A-Za-z_][A-Za-z0-9_]*$/.test(w)) {
+          loopHeader.phase = "after-name";
+          handled = true;
+        } else if (loopHeader.phase === "after-name" && !quoted && w === "in") {
+          loopHeader.phase = "words";
+          handled = true;
+        } else if (loopHeader.phase === "after-name" && !quoted && w === "do") {
+          loopHeader = undefined;
+          handled = true;
+        } else if (loopHeader.phase === "words") {
+          handled = true;
+        } else if (loopHeader.phase === "body" && !quoted && (w === "do" || w === "{")) {
+          loopHeader = undefined;
+          handled = true;
+        } else {
+          flag(st, "malformed for/select header");
+          loopHeader = undefined;
+        }
+      }
+      if (!handled && controlStart && !quoted && (w === "for" || w === "select")) {
+        loopHeader = { phase: "name", keyword: w };
         compoundEndPending = false;
-      } else if (loopHeader && atStart) {
-        if (!quoted && w === "do") loopHeader = false;
-      } else if (controlStart && !quoted && w === "case") {
-        cases.push({ phase: "subject", patternStarted: false });
-        compoundEndPending = false;
-      } else if (controlStart && !quoted && w === "esac") {
-        if (caseState && caseState.phase !== "subject") cases.pop();
-        else flag(st, "esac without case body");
-        compoundEndPending = true;
-      } else if (caseState?.phase === "subject") {
-        if (!quoted && w === "in") caseState.phase = "patterns";
-      } else if (caseState?.phase === "patterns") {
-        caseState.patternStarted = true;
-      } else if (controlStart && !quoted && w === "}") {
-        compoundEndPending = true;
-      } else if (controlStart && !quoted && (w === "fi" || w === "done")) {
-        compoundEndPending = true;
-      } else if (controlStart && !quoted && RESERVED.has(w)) {
-        compoundEndPending = false;
-      } else if (atStart && ASSIGNMENT.test(raw)) {
-        compoundEndPending = false;
-        assignments.push(w);
-      } else {
-        compoundEndPending = false;
-        argv.push(w);
-        globs.push(wordGlob);
-        dynamic.push(wordDynamic);
+        handled = true;
+      }
+      if (!handled) {
+        if (controlStart && !quoted && w === "case") {
+          cases.push({ phase: "subject", patternStarted: false });
+          compoundEndPending = false;
+        } else if (controlStart && !quoted && w === "esac") {
+          if (caseState && caseState.phase !== "subject") cases.pop();
+          else flag(st, "esac without case body");
+          compoundEndPending = true;
+        } else if (caseState?.phase === "subject") {
+          if (!quoted && w === "in") caseState.phase = "patterns";
+        } else if (caseState?.phase === "patterns") {
+          caseState.patternStarted = true;
+        } else if (controlStart && !quoted && w === "}") {
+          compoundEndPending = true;
+        } else if (controlStart && !quoted && (w === "fi" || w === "done")) {
+          compoundEndPending = true;
+        } else if (controlStart && !quoted && RESERVED.has(w)) {
+          compoundEndPending = false;
+        } else if (atStart && ASSIGNMENT.test(raw)) {
+          compoundEndPending = false;
+          assignments.push(w);
+        } else {
+          compoundEndPending = false;
+          argv.push(w);
+          globs.push(wordGlob);
+          dynamic.push(wordDynamic);
+        }
       }
     }
     w = "";
@@ -317,6 +340,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
           j++;
         } else if (s[j + 1] === ")") {
           if (/[A-Za-z_]/.test(body)) flag(st, "arithmetic expansion references variables");
+          if (loopHeader) loopHeader.phase = "body";
           i = j + 2;
           return;
         } else break;
@@ -360,6 +384,12 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
     } else if (c === "\n") {
       if (loopHeader) {
         endWord();
+        if (loopHeader?.phase === "name") {
+          flag(st, "malformed for/select header");
+          loopHeader = undefined;
+        } else if (loopHeader && (loopHeader.phase === "after-name" || loopHeader.phase === "words")) {
+          loopHeader.phase = "body";
+        }
         flushControlInner();
       } else {
         endCmd();
@@ -427,7 +457,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
       backtick();
     } else if (c === "#" && !inWord) {
       while (i < s.length && s[i] !== "\n") i++;
-    } else if (c === "(" && loopHeader && !inWord && s[i + 1] === "(") {
+    } else if (c === "(" && loopHeader?.phase === "name" && loopHeader.keyword === "for" && !inWord && s[i + 1] === "(") {
       arithmeticFor();
     } else if (c === "(" || c === ")") {
       const caseState = cases[cases.length - 1];
@@ -457,9 +487,20 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
       }
     } else if (c === ";" || c === "|") {
       const caseState = cases[cases.length - 1];
-      if (loopHeader) {
+      if (loopHeader && c === ";") {
         endWord();
+        if (loopHeader?.phase === "name") {
+          flag(st, "malformed for/select header");
+          loopHeader = undefined;
+        } else if (loopHeader && (loopHeader.phase === "after-name" || loopHeader.phase === "words")) {
+          loopHeader.phase = "body";
+        }
         flushControlInner();
+        i++;
+      } else if (loopHeader) {
+        flag(st, "malformed for/select header");
+        loopHeader = undefined;
+        endCmd();
         i++;
       } else if (c === "|" && caseState?.phase === "patterns") {
         endWord();
@@ -553,7 +594,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
   if (closer === ")") flag(st, "unterminated $(");
   if (depth > 0) flag(st, "unmatched (");
   const finished = finish();
-  if (loopHeader) flag(st, "unterminated for/select header");
+  if (loopHeader) flag(st, "malformed for/select header");
   if (cases.length > 0) flag(st, "unterminated case statement");
   return { parts: finished, end: s.length };
 

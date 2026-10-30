@@ -525,6 +525,27 @@ test("for and select loops evaluate only their bodies and substitutions", () => 
   assert.notEqual(run("bash", { command: "for ((i=0;i<3;i++)); do echo $i; done" }, env("acceptEdits")).verdict, "allow");
 });
 
+test("for/select headers require a separator and do or brace body", () => {
+  for (const command of [
+    "for f in a; { rm x; }",
+    "for f in a; { rm x; }; echo do; ls",
+    "select f in a; { rm x; }",
+    "for f in a; echo hi",
+    'for f in a; "do"; rm x',
+    "for f in a; bleep do rm x; done",
+    "for f in a; for g in b; do rm x; done",
+    "for f in a b c do rm x; done",
+  ]) assert.notEqual(run("bash", { command }, env("acceptEdits")).verdict, "allow", command);
+  verdict("bash", "ask", { command: "for f in a; { rm x; }" }, env("acceptEdits"));
+  const afterBrace = verdict("bash", "ask", { command: "for f in a; { rm x; }; echo do; ls" }, env("acceptEdits"));
+  assert.ok(afterBrace.flags.some((flag) => flag.label === "rm x"));
+  verdict("bash", "ask", { command: "for f in a; echo do; rm x" }, env("acceptEdits"));
+  const selected = verdict("bash", "ask", { command: "select f in a; { rm x; }" }, env("acceptEdits"));
+  assert.ok(selected.flags.some((flag) => flag.label === "rm x"));
+  verdict("bash", "allow", { command: "for f in a; { cat f; }" }, env("acceptEdits"));
+  verdict("bash", "ask", { command: "for f do rm \"$f\"; done" }, env("acceptEdits"));
+});
+
 test("while read loops and ordinary conditional bodies are evaluated safely", () => {
   verdict("bash", "allow", { command: "while read l; do echo \"$l\"; done < f" }, env("acceptEdits"));
   verdict("bash", "deny", { command: "while read l; do echo \"$l\"; done < f" }, env("acceptEdits", { deny: rules("Read(**/f)") }));
