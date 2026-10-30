@@ -7,7 +7,7 @@ export type Git = (args: string[], cwd: string) => string | null;
 
 function realpathAllowMissing(path: string): string {
   const absolute = resolve(path);
-  if (existsSync(absolute)) return realpathSync(absolute);
+  if (existsSync(absolute)) return realpathSync.native(absolute);
   const parent = dirname(absolute);
   if (parent === absolute) return absolute;
   return join(realpathAllowMissing(parent), basename(absolute));

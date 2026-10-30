@@ -7,6 +7,7 @@ export type Config = {
   allow: Rule[];
   ask: Rule[];
   deny: Rule[];
+  ruleSources: Map<Rule, string>;
   defaultMode?: Mode;
   readOnlyCommands: string[];
   unattended: "auto" | boolean;
@@ -43,6 +44,7 @@ function addRules(
   path: string,
   ignored: string[],
   target: Rule[],
+  ruleSources: Map<Rule, string>,
   repoFile: boolean,
 ): void {
   if (!permissions || !own(permissions, field)) return;
@@ -61,6 +63,7 @@ function addRules(
       ignored.push(`${path}: rule "${String(entry)}" (malformed)`);
     } else if (!target.some((existing) => existing.text === rule.text)) {
       target.push(rule);
+      ruleSources.set(rule, path);
     }
   }
 }
@@ -82,6 +85,7 @@ export function loadConfig(paths: { global: string; project: string; repo: strin
     allow: [],
     ask: [],
     deny: [],
+    ruleSources: new Map(),
     readOnlyCommands: [],
     unattended: "auto",
     sources: loaded.map(({ path, loaded: wasLoaded, error }) => ({ path, loaded: wasLoaded, ...(error === undefined ? {} : { error }) })),
@@ -102,9 +106,9 @@ export function loadConfig(paths: { global: string; project: string; repo: strin
       else ignored.push(`${source.path}: permissions (expected an object)`);
     }
 
-    addRules(permissions, "allow", source.path, ignored, config.allow, isRepo);
-    addRules(permissions, "ask", source.path, ignored, config.ask, false);
-    addRules(permissions, "deny", source.path, ignored, config.deny, false);
+    addRules(permissions, "allow", source.path, ignored, config.allow, config.ruleSources, isRepo);
+    addRules(permissions, "ask", source.path, ignored, config.ask, config.ruleSources, false);
+    addRules(permissions, "deny", source.path, ignored, config.deny, config.ruleSources, false);
 
     if (permissions && own(permissions, "defaultMode")) {
       if (isRepo) {

@@ -57,7 +57,7 @@ Example global or per-project settings:
 {
   "permissions": {
     "allow": ["Bash(./gradlew *)", "Bash(/home/u/project/scripts/check.sh)"],
-    "ask": ["Edit(/home/u/project/**/.env*)", "Edit(/home/u/project/**/.ssh/**)"],
+    "ask": ["Edit(**/.env*)", "Edit(**/.ssh/**)"],
     "deny": ["Read(/home/u/project/**/local.properties)"],
     "defaultMode": "acceptEdits"
   },
@@ -67,7 +67,7 @@ Example global or per-project settings:
 }
 ```
 
-The repo file may contain only `permissions.ask` and `permissions.deny` from this example.
+The repo file may contain only `permissions.ask` and `permissions.deny` from this example. For global settings, keep `ask: ["Edit(**/.env*)", "Edit(**/.ssh/**)"]` to protect secrets; writes to any `.git` directory are protected by a built-in ask (and denied in `plan` mode), independent of configured rules.
 
 ## Modes
 
@@ -85,19 +85,23 @@ Read tools are allowed inside and outside the project root by default, subject t
 
 A small shell lexer splits compound commands at `&&`, `||`, `;`, `|`, `&`, and newlines. Every part is evaluated; a deny takes precedence over an ask or allow. Single quotes, double quotes, and backslash escapes are handled; quoted text is data, not a command. Command substitutions using `$()` and backticks are parsed recursively, including inside double quotes, so their commands are checked too. Leading `NAME=value` assignments are stripped before matching. Dangerous environment assignments require approval, and assignments make a command ineligible for the read-only allowlist.
 
-Heredoc bodies are skipped through their delimiter while the owning command is still checked. Command substitutions in an expandable heredoc body make the command unsafe. `#` comments at the start of a word are dropped. Redirect targets are checked as edits; relative targets follow the shell's current directory, including a simple `cd` in the command sequence. `/dev/null` and file-descriptor duplication are not treated as output-file edits.
+Heredoc bodies are skipped through their delimiter while the owning command is still checked. Command substitutions in an expandable heredoc body make the command unsafe. `#` comments at the start of a word are dropped. Output redirect targets are checked as edits and `<` input targets as reads; relative targets follow the shell's current directory, including a simple `cd` in the command sequence. `/dev/null`, `/dev/stdout`, `/dev/stderr`, `/dev/tty`, `/dev/fd/<n>`, and file-descriptor duplication are not treated as output-file edits.
 
 The lexer fails closed: parse errors, unbalanced quotes, unterminated heredocs or substitutions, process substitutions (`<(...)` and `>(...)`), and commands whose behavior it cannot inspect require approval (or are denied in `plan`). This includes `eval`, `source`/`.`, `exec`, `bash`/`sh`/`zsh -c`, and shells reading a script from stdin. It detects these cases through common wrappers (`env`, `command`, `nohup`, `time`, `nice`, and `timeout`) and treats a variable command name as unsafe. In `plan`, any Bash part that is not read-only is denied, even if an allow rule matches it.
 
 ## Read-only commands
 
-The built-in list includes `ls`, `cat`, `head`, `tail`, `wc`, `grep`, `rg`, `fd`, `pwd`, `echo`, `printf`, `which`, `file`, `stat`, `du`, `df`, `jq`, `sort`, `uniq`, `cut`, `tr`, `diff`, `cmp`, `basename`, `dirname`, `realpath`, `true`, `test`, `[`, `date`, and `cd`, plus checked forms of `find`, `sed`, `awk`, `git`, and `gh`. Anything that can write files or execute code is excluded from the built-in read-only forms. For commands with checked option allowlists, GNU long options must match the full safe option name; an abbreviation is not accepted merely because it shares a prefix with a safe option.
+The built-in list includes `ls`, `cat`, `head`, `tail`, `wc`, `grep`, `rg`, `fd`, `pwd`, `echo`, `printf`, `which`, `file`, `stat`, `du`, `df`, `jq`, `sort`, `uniq`, `cut`, `tr`, `diff`, `cmp`, `basename`, `dirname`, `realpath`, `true`, `test`, `[`, `date`, and `cd`, plus checked forms of `find`, `sed`, `awk`, `git`, and `gh`. Known file-writing and code-execution forms are excluded from the built-in read-only forms; command-specific option checks are conservative, not a complete sandbox for every utility version. For commands with checked option allowlists, GNU long options must match the full safe option name; an abbreviation is not accepted merely because it shares a prefix with a safe option.
 
 The checked forms include:
 
 - `find` without `-exec`, `-execdir`, `-delete`, `-ok`, `-okdir`, `-fls`, or `-fprint*`; `sed` without in-place or script-file options; and `awk` without code execution, file loading, output redirection, or pipelines.
 - Read-only Git queries: `status`, `log`, `show`, `diff`, `blame`, `rev-parse`, `ls-files`, `ls-tree`, `grep`, `merge-base`, `cat-file`, `describe`, and `shortlog`. `branch` allows no arguments or the listed query flags; `remote` allows no arguments or exactly `-v`; `stash` allows exactly `list`; and `config` requires a read option (`--get`, `--get-all`, `--get-regexp`, `--list`, or `-l`) and no write option. `reflog` is allowed except for `expire`, `delete`, `drop`, `exists`, or `--` forms.
 - `gh pr view|list|diff|checks`, `gh issue view|list`, and `gh api` only when the method is GET and no form fields or input file are supplied.
+
+Read rules are applied to explicit file operands of recognized read-only commands and to `<` input redirects. Directory operands to `grep`, `find`, and `ls` are not expanded into individual files, so rules for files nested under those directories may not be applied; use explicit file operands when those rules must be enforced.
+
+A rule such as `deny: ["Bash(git push:*)"]` matches the parsed command words exactly. `command git push` and `/usr/bin/git push` do not match that deny rule; they are not built-in read-only commands and require approval in interactive modes (or are denied in `plan`).
 
 Global and per-project `readOnlyCommands` settings can add command names without checking their arguments; use them only for commands trusted to be read-only. The repo file cannot set this list.
 

@@ -17,10 +17,10 @@ test("describe lists project, source status, ignored entries, mode origin and un
   const project = join(temp, "permissions", "project.json");
   const repo = join(root, ".pi", "permissions.json");
   mkdirSync(join(temp, "permissions"));
-  writeFileSync(global, JSON.stringify({ permissions: { allow: ["Bash(git status)"] } }));
+  writeFileSync(global, JSON.stringify({ permissions: { allow: ["Bash(git status)"], ask: ["Edit(**/.env*)"] } }));
   writeFileSync(project, "{");
   mkdirSync(join(root, ".pi"));
-  writeFileSync(repo, JSON.stringify({ permissions: { allow: ["Bash(git push:*)"] } }));
+  writeFileSync(repo, JSON.stringify({ permissions: { allow: ["Bash(git push:*)"], deny: ["Read(**/local.properties)"] } }));
   const config = loadConfig({ global, project, repo });
   const state: PermissionState = {
     project: { root, key: root }, config, cwd: root, projectFile: project, session: [],
@@ -34,6 +34,9 @@ test("describe lists project, source status, ignored entries, mode origin and un
   assert.match(output, new RegExp(`${project}.*error:`, "s"));
   assert.match(output, new RegExp(`${repo}.*loaded`, "s"));
   assert.match(output, /ignored/i);
+  assert.match(output, new RegExp(`Bash\\(git status\\).*${global.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}`));
+  assert.ok(output.includes(`Edit(**/.env*) [${global}]`));
+  assert.ok(output.includes(`Read(**/local.properties) [${repo}]`));
   assert.match(output, /plan.*PI_PERMISSIONS_MODE/);
   assert.match(output, /unattended:\s*yes/i);
 });
@@ -61,7 +64,7 @@ test("explain includes redirect targets and fails closed on unsafe parses", () =
 
   assert.match(explain("echo x > out", env), /redirect .*\/out → ask \(no allow rule\)/i);
   const variableRedirect = explain("echo x > $OUT", env);
-  assert.match(variableRedirect, /redirect \/\$OUT → ask \(no allow rule\)/);
+  assert.ok(variableRedirect.includes(`redirect ${join(root, "$OUT")} → ask (no allow rule)`));
   assert.match(variableRedirect, /Overall: ask/);
   assert.match(explain("echo 'unterminated", env), /tool echo 'unterminated → ask \(unparsed:/i);
 });

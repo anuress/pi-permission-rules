@@ -6,6 +6,7 @@ const READ_ONLY_COMMANDS = new Set([
   "basename", "dirname", "realpath", "true", "test", "[", "date", "cd",
 ]);
 
+const GLOB_CHECKED_COMMANDS = new Set(["find", "sed", "sort", "rg", "fd", "git", "file", "uniq", "date", "awk"]);
 const READ_ONLY_GIT_COMMANDS = new Set([
   "status", "log", "show", "diff", "blame", "rev-parse", "ls-files", "ls-tree", "grep",
   "merge-base", "cat-file", "describe", "shortlog",
@@ -20,9 +21,13 @@ export function isReadOnly(part: Part, extra: readonly string[]): boolean {
   const first = part.argv[0];
   if (first === undefined) return true;
   if (first.includes("$")) return false;
+  if (extra.includes(first)) return true;
+  if (first.includes("/")) return false;
 
-  const command = basename(first);
-  if (extra.some((name) => basename(name) === command)) return true;
+  const command = first;
+  if (["sed", "awk"].includes(command) && part.dynamic?.some((expanded, index) => index > 0 && expanded)) return false;
+  if (GLOB_CHECKED_COMMANDS.has(command)
+    && part.globs?.some((glob, index) => index > 0 && glob && !part.argv.slice(1, index).includes("--"))) return false;
   if (READ_ONLY_COMMANDS.has(command)) return simpleCommandIsReadOnly(command, part.argv.slice(1));
   if (command === "find") return findIsReadOnly(part.argv.slice(1));
   if (command === "sed") return sedIsReadOnly(part.argv.slice(1));
@@ -30,10 +35,6 @@ export function isReadOnly(part: Part, extra: readonly string[]): boolean {
   if (command === "git") return gitIsReadOnly(part.argv.slice(1));
   if (command === "gh") return ghIsReadOnly(part.argv.slice(1));
   return false;
-}
-
-function basename(path: string): string {
-  return path.slice(path.lastIndexOf("/") + 1);
 }
 
 function longOptionName(arg: string): string {
@@ -46,6 +47,8 @@ function hasInlineOptionValue(arg: string): boolean {
 }
 
 function simpleCommandIsReadOnly(command: string, args: string[]): boolean {
+  if (["test", "["].includes(command) && args.some((arg) => arg === "-v")) return false;
+  if (command === "printf" && args.some((arg) => arg === "-v" || arg.startsWith("-v"))) return false;
   if (command === "file") return fileIsReadOnly(args);
   if (command === "sort") return sortIsReadOnly(args);
   if (command === "uniq") return uniqOperands(args) <= 1;
@@ -447,24 +450,39 @@ function ghIsReadOnly(args: string[]): boolean {
   if (args[0] === "issue") return ["view", "list"].includes(args[1] ?? "");
   if (args[0] !== "api") return false;
 
+  const valueOptions = new Set(["H", "q", "t", "p"]);
+  const noValueOptions = new Set(["i"]);
+  const longValueOptions = new Set(["--header", "--jq", "--template", "--hostname", "--cache", "--preview"]);
+  const longNoValueOptions = new Set(["--paginate", "--include", "--silent", "--verbose"]);
   for (let i = 1; i < args.length; i++) {
     const arg = args[i];
-    if (arg === "-X" || arg === "--method") {
-      const method = args[++i];
-      if (method !== "GET") return false;
+    if (arg === "--") return true;
+    if (!arg.startsWith("-") || arg === "-") continue;
+    if (arg.startsWith("--")) {
+      const option = longOptionName(arg);
+      if (option === "--method") {
+        const method = hasInlineOptionValue(arg) ? arg.slice(arg.indexOf("=") + 1) : args[++i];
+        if (method !== "GET") return false;
+      } else if (longValueOptions.has(option)) {
+        const value = hasInlineOptionValue(arg) ? arg.slice(arg.indexOf("=") + 1) : args[++i];
+        if (!value || value.startsWith("--")) return false;
+      } else if (!longNoValueOptions.has(option) || hasInlineOptionValue(arg)) return false;
       continue;
     }
-    if (arg.startsWith("-X") && arg.length > 2) {
-      if (arg.slice(2) !== "GET") return false;
-      continue;
+    for (let j = 1; j < arg.length; j++) {
+      const option = arg[j];
+      if (option === "X") {
+        const method = arg.slice(j + 1) || args[++i];
+        if (method !== "GET") return false;
+        break;
+      }
+      if (valueOptions.has(option)) {
+        const value = arg.slice(j + 1) || args[++i];
+        if (!value || value.startsWith("--")) return false;
+        break;
+      }
+      if (!noValueOptions.has(option)) return false;
     }
-    if (arg.startsWith("--method=")) {
-      if (arg.slice("--method=".length) !== "GET") return false;
-      continue;
-    }
-    if (["-f", "-F", "--field", "--raw-field", "--input"].includes(arg)
-      || arg.startsWith("-f") || arg.startsWith("-F")
-      || arg.startsWith("--field=") || arg.startsWith("--raw-field=") || arg.startsWith("--input=")) return false;
   }
   return true;
 }

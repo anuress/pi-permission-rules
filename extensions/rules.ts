@@ -49,7 +49,7 @@ export function matchPath(rule: Rule, absPath: string, root: string): boolean {
   let pattern = rule.pattern;
   if (pattern.startsWith("~/")) pattern = `${homedir()}${pattern.slice(1)}`;
   else if (!isAbsolute(pattern)) pattern = `${root}/${pattern}`;
-  return globRegex(pattern, { slash: false, question: true }).test(absPath);
+  return globRegex(pattern, { slash: false, question: true }, process.platform === "darwin" ? "i" : "").test(absPath);
 }
 
 export function toolFamily(toolName: string): "Bash" | "Read" | "Edit" | string {
@@ -59,7 +59,7 @@ export function toolFamily(toolName: string): "Bash" | "Read" | "Edit" | string 
   return toolName;
 }
 
-function globRegex(pattern: string, options: { slash: boolean; question: boolean }): RegExp {
+function globRegex(pattern: string, options: { slash: boolean; question: boolean }, flags = ""): RegExp {
   let source = "^";
   for (let i = 0; i < pattern.length; i++) {
     const char = pattern[i];
@@ -80,5 +80,5 @@ function globRegex(pattern: string, options: { slash: boolean; question: boolean
     }
   }
   source += "$";
-  return new RegExp(source);
+  return new RegExp(source, flags);
 }

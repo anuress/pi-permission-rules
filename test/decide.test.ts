@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, symlinkSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, symlinkSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseRule, type Rule } from "../extensions/rules.ts";
@@ -30,7 +30,7 @@ function rules(...texts: string[]): Rule[] {
 
 function config(overrides: Partial<Config> = {}): Config {
   return {
-    allow: [], ask: [], deny: [], readOnlyCommands: [], unattended: "auto", sources: [], ignored: [],
+    allow: [], ask: [], deny: [], ruleSources: new Map(), readOnlyCommands: [], unattended: "auto", sources: [], ignored: [],
     ...overrides,
   };
 }
@@ -200,7 +200,9 @@ test("empty or partless bash calls fail closed", () => {
   for (const command of [undefined, "", "(", "!", "|", ";", ">"] as const) {
     const decision = decide(command === undefined ? { tool: "bash" } : { tool: "bash", command }, env("acceptEdits"));
     assert.equal(decision.verdict, "ask", JSON.stringify({ command, decision }));
-    assert.equal(decision.flags[0]?.rule, "unparsed: empty command", JSON.stringify({ command, decision }));
+    const expectedRule = command === ">" ? "unparsed: redirect without target"
+      : command === "(" ? "unparsed: unmatched (" : "unparsed: empty command";
+    assert.equal(decision.flags[0]?.rule, expectedRule, JSON.stringify({ command, decision }));
     assert.equal(decision.flags[0]?.suggestion, null);
   }
 
@@ -236,12 +238,22 @@ test("suggestRule follows command-name heuristic and suppresses code runners", (
     ["./gradlew :shop:test", "Bash(./gradlew:*)"],
     ["curl https://x", "Bash(curl:*)"],
     ["python3 x.py", null],
+    ["npx prettier --write .", null],
   ] as const) {
     const parsed = parse(command);
     assert.equal(suggestRule(parsed.parts[0]), expected, command);
   }
+  for (const command of ["env ls", "command ls", "nohup ls", "time ls", "nice ls", "timeout 5 ls", "builtin cd", "xargs ls", "awk '{print}'", "gawk '{print}'", "sed -n p f", "find . -name x", "npx prettier --write ."]) {
+    assert.equal(suggestRule(parse(command).parts[0]), null, command);
+  }
+  for (const [command, expected] of [
+    ["gh pr merge 1", "Bash(gh pr merge:*)"],
+    ["gh issue close 1", "Bash(gh issue close:*)"],
+    ["git stash pop", "Bash(git stash pop:*)"],
+    ["git remote add origin url", "Bash(git remote add:*)"],
+  ] as const) assert.equal(suggestRule(parse(command).parts[0]), expected, command);
   assert.equal(suggestRule(parse("FOO=1 ls").parts[0]), null);
-  assert.equal(suggestRule(parse("").parts[0] ?? { argv: [], assignments: [], redirects: [], text: "", scope: "" }), null);
+  assert.equal(suggestRule(parse("").parts[0] ?? { argv: [], assignments: [], redirects: [], inputs: [], globs: [], dynamic: [], redirectGlobs: [], inputGlobs: [], text: "", scope: "" }), null);
 });
 
 test("resolveMode follows precedence and ignores invalid environment values with warning", () => {
@@ -277,4 +289,126 @@ test("toBlock uses the exact unattended approval message", () => {
     reason: "permission: `git push origin x` is denied (Bash(git push:*)). It was not run. Use a read-only alternative, or report that this step needs the orchestrator.",
   });
   assert.deepEqual(toBlock({ verdict: "allow", flags: [], reason: "", items: [] }), { block: true, reason: "" });
+});
+
+test("C1 arithmetic and assignment expansion repros require approval or plan denial", () => {
+  const repros = [
+    "echo ${x:='a[$(touch P5)]'} $((x))",
+    "x='a[$(touch PWN)]'; echo $((x))",
+    "printf -v x \"%s\" 'a[$(touch P6)]'; echo $((x))",
+    "test -v PWN",
+    "[ -v PWN ]",
+    "x='a[$(touch PWN)]'; echo ${y[x]}",
+    "PATH=/tmp/evil; ls",
+  ];
+  for (const command of repros) {
+    assert.equal(run("bash", { command }, env("acceptEdits")).verdict, "ask", command);
+    assert.equal(run("bash", { command }, env("plan")).verdict, "deny", command);
+  }
+  assert.equal(run("bash", { command: "echo $((1+2))" }, env("plan")).verdict, "allow");
+  const assignment = run("bash", { command: "X=1" }, env("acceptEdits"));
+  assert.equal(assignment.verdict, "ask");
+  assert.equal(assignment.flags[0].rule, "assignment statement");
+  assert.equal(assignment.flags[0].suggestion, null);
+});
+
+test("C2 repeated cd in one scope makes later redirects unknown and single cd still works", () => {
+  const repros = [
+    `cd ~/.ssh || cd ${root}; echo k >> authorized_keys`,
+    `cd ~/.ssh; cd ${root} & echo k >> authorized_keys`,
+    `cd ~/.ssh; cd ${root} | true; echo k >> authorized_keys`,
+  ];
+  for (const command of repros) assert.equal(run("bash", { command }, env("acceptEdits")).verdict, "ask", command);
+  verdict("bash", "allow", { command: "cd sub && echo x > out" }, env("acceptEdits"));
+  verdict("bash", "ask", { command: `cd /etc; (cd ${root}; echo x > out)` }, env("acceptEdits"));
+});
+
+test("C3 gh api dangerous clusters are not read-only", () => {
+  for (const command of ["gh api -iX DELETE repos/o/r/git/refs/heads/main", "gh api -iXDELETE repos/o/r", "gh api -ifa=b repos/o/r"]) {
+    assert.equal(run("bash", { command }, env("acceptEdits")).verdict, "ask", command);
+    assert.equal(run("bash", { command }, env("plan")).verdict, "deny", command);
+  }
+});
+
+test("I1 path-qualified command names never use the built-in read-only allowlist", () => {
+  for (const command of ["./ls", "bin/git status", "/tmp/x/cat f"]) {
+    assert.equal(run("bash", { command }, env("acceptEdits")).verdict, "ask", command);
+  }
+});
+
+test("I3 .git write targets always ask outside plan mode", () => {
+  verdict("write", "ask", { path: ".git/config" }, env("acceptEdits"));
+  verdict("bash", "ask", { command: "echo x > .git/hooks/pre-commit" }, env("acceptEdits"));
+  verdict("write", "deny", { path: ".git/config" }, env("plan"));
+});
+
+test("C4 darwin case-variant paths match read deny and edit ask rules", () => {
+  if (process.platform !== "darwin") return;
+  writeFileSync(join(root, "local.properties"), "secret");
+  writeFileSync(join(root, ".env"), "secret");
+  const state = env("acceptEdits", { deny: rules("Read(**/local.properties)"), ask: rules("Edit(**/.env*)") });
+  verdict("read", "deny", { path: "LOCAL.PROPERTIES" }, state);
+  verdict("write", "ask", { path: ".ENV" }, state);
+  verdict("edit", "ask", { path: ".Env" }, state);
+  verdict("bash", "ask", { command: "echo > .ENV" }, state);
+});
+
+test("I4 read rules apply to file operands and input redirects", () => {
+  const state = env("acceptEdits", { deny: rules("Read(**/local.properties)") });
+  for (const command of ["cat local.properties", "cat -n local.properties", "cat < local.properties", "head -5 local.properties", "grep -n key local.properties", "grep -f local.properties other.txt", "grep --file=local.properties other.txt", "grep -flocal.properties other.txt"]) {
+    assert.equal(run("bash", { command }, state).verdict, "deny", command);
+  }
+});
+
+test("I2 glob redirects and cd targets are unknown; safe glob reads stay read-only", () => {
+  verdict("bash", "ask", { command: "echo x > *.txt" }, env("acceptEdits"));
+  verdict("bash", "ask", { command: "cd sub* && echo x > out" }, env("acceptEdits"));
+  for (const command of ["ls *.kt", "cat *.md", "grep x *.kt", "wc -l *.ts"]) {
+    verdict("bash", "allow", { command }, env("plan"));
+  }
+});
+
+test("M6 standard output device redirects are exempt", () => {
+  for (const target of ["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty", "/dev/fd/3"]) {
+    verdict("bash", "allow", { command: `echo x > ${target}` }, env("plan"));
+  }
+});
+
+test("bash garbage fuzz is seeded, fail-closed, and reproducible", () => {
+  const seed = 0x5eed1234;
+  let state = seed;
+  const alpha = ["a", "'", '"', "`", "$", "(", ")", "<", ">", "|", "&", ";", "\\", "\n", " ", "#", "="];
+  for (let i = 0; i < 1000; i++) {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    let command = "";
+    const length = state % 20;
+    for (let j = 0; j < length; j++) {
+      state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+      command += alpha[state % alpha.length];
+    }
+    try {
+      assert.notEqual(run("bash", { command }, env("acceptEdits")).verdict, "allow", `seed=${seed} case=${i} command=${JSON.stringify(command)}`);
+    } catch (error) {
+      assert.fail(`seed=${seed} case=${i} command=${JSON.stringify(command)}: ${String(error)}`);
+    }
+  }
+  for (const command of ["echo 'unterminated", "echo $(", "echo `", "cat <", "echo >", "(echo x", "echo $((x", "echo ${x:=a", "| rm -rf /", "$(rm -rf /)"]) {
+    assert.notEqual(run("bash", { command }, env("acceptEdits")).verdict, "allow", command);
+  }
+});
+
+test("brace-expanded cd and redirect targets are unknown", () => {
+  verdict("bash", "ask", { command: "cd {/tmp,zz} && echo k > x" }, env("acceptEdits"));
+  verdict("bash", "ask", { command: "echo k > {/tmp/x,}" }, env("acceptEdits"));
+});
+
+test("pushd, popd and builtin cd make later relative redirects unknown even when the part is granted", () => {
+  const state = { ...env("acceptEdits"), session: rules("Bash(pushd:*)", "Bash(popd:*)", "Bash(builtin cd:*)", "Bash(command cd:*)") };
+  for (const command of ["pushd ~/.ssh; echo k >> authorized_keys", "popd; echo k >> authorized_keys", "builtin cd ~/.ssh; echo k >> authorized_keys", "command cd ~/.ssh; echo k >> authorized_keys"]) {
+    assert.equal(run("bash", { command }, state).verdict, "ask", command);
+  }
+});
+
+test("assignment statements honour deny rules", () => {
+  verdict("bash", "deny", { command: "X=1" }, env("acceptEdits", { deny: rules("Bash") }));
 });

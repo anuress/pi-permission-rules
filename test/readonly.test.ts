@@ -4,7 +4,7 @@ import { parse, type Part } from "../extensions/shell.ts";
 import { CODE_RUNNERS, isReadOnly } from "../extensions/readonly.ts";
 
 function part(text: string): Part {
-  if (text === "") return { argv: [], assignments: [], redirects: [], text: "", scope: "" };
+  if (text === "") return { argv: [], assignments: [], redirects: [], inputs: [], globs: [], dynamic: [], redirectGlobs: [], inputGlobs: [], text: "", scope: "" };
   const parsed = parse(text);
   assert.ok(parsed.parts.length > 0, `expected a parsed command: ${text}`);
   return parsed.parts[0];
@@ -21,7 +21,7 @@ const readOnlyCases: [string, boolean][] = [
   ["which node", true],
   ["[ -f file ]", true],
   ["env rm x", false],
-  ["/usr/bin/grep x", true],
+  ["/usr/bin/grep x", false],
   ["$COMMAND x", false],
   ["GIT_EXTERNAL_DIFF=/x git diff", false],
   ["LD_PRELOAD=/x ls", false],
@@ -254,10 +254,10 @@ test("isReadOnly follows the built-in command allowlist", () => {
   }
 });
 
-test("extra commands are matched by basename and allow arbitrary arguments", () => {
+test("extra commands match argv[0] exactly and allow arbitrary arguments", () => {
   assert.equal(isReadOnly(part("fumi search x"), ["fumi"]), true);
   assert.equal(isReadOnly(part("fumi search x"), []), false);
-  assert.equal(isReadOnly(part("/usr/local/bin/fumi anything"), ["/opt/tools/fumi"]), true);
+  assert.equal(isReadOnly(part("/usr/local/bin/fumi anything"), ["/opt/tools/fumi"]), false);
 });
 
 test("CODE_RUNNERS is exactly the no-persistent-option command set", () => {
@@ -265,4 +265,45 @@ test("CODE_RUNNERS is exactly the no-persistent-option command set", () => {
     ".", "bash", "env", "eval", "exec", "node", "perl", "python", "python3", "ruby", "sh", "source", "sudo", "xargs", "zsh",
   ]);
   assert.ok(CODE_RUNNERS instanceof Set);
+});
+
+test("read-only commands reject path-qualified and configured command names", () => {
+  for (const command of ["./ls", "bin/git status", "/tmp/x/cat f"]) {
+    assert.equal(isReadOnly(part(command), []), false, command);
+  }
+  assert.equal(isReadOnly(part("/usr/bin/grep x"), []), false);
+  assert.equal(isReadOnly(part("/usr/local/bin/fumi x"), ["fumi"]), false);
+  assert.equal(isReadOnly(part("/usr/local/bin/fumi x"), ["/usr/local/bin/fumi"]), true);
+  assert.equal(isReadOnly(part("fumi x"), ["fumi"]), true);
+});
+
+test("unquoted glob operands block checked read-only commands only", () => {
+  for (const command of ["find *", "sed -n p *", "sort *", "rg TODO *", "fd TODO *", "git log *", "file *", "uniq *", "date *", "awk '{print}' *"]) {
+    assert.equal(isReadOnly(part(command), []), false, command);
+  }
+  for (const command of ["ls *.kt", "cat *.md", "grep x *.kt", "wc -l *.ts", "cat '*.md'"]) {
+    assert.equal(isReadOnly(part(command), []), true, command);
+  }
+});
+
+test("printf -v and test -v are not read-only", () => {
+  for (const command of ["printf -v x hi", "test -v x", "[ -v x ]"]) {
+    assert.equal(isReadOnly(part(command), []), false, command);
+  }
+  assert.equal(isReadOnly(part("printf hi"), []), true);
+});
+
+test("sed and awk variable scripts are not treated as literal read-only programs", () => {
+  for (const command of ["sed $x f", "sed -e $x f", "awk $x f", "awk $(cat script.awk) f"]) {
+    assert.equal(isReadOnly(part(command), []), false, command);
+  }
+});
+
+test("gh api requires only explicitly read-only options and GET method", () => {
+  for (const command of ["gh api -iX DELETE repos/o/r/git/refs/heads/main", "gh api -iXDELETE repos/o/r", "gh api -ifa=b repos/o/r"]) {
+    assert.equal(isReadOnly(part(command), []), false, command);
+  }
+  for (const command of ["gh api -i repos/o/r", "gh api -H Accept:json repos/o/r", "gh api -q .name repos/o/r", "gh api -X GET repos/o/r", "gh api -iXGET repos/o/r", "gh api --method=GET repos/o/r"]) {
+    assert.equal(isReadOnly(part(command), []), true, command);
+  }
 });

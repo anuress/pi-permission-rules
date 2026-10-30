@@ -1,12 +1,12 @@
 // Shell lexer: splits a bash command into parts so rules match per sub-command,
 // never against raw text. Fails closed (`unsafe`) on anything it cannot vouch for.
 
-export type Part = { argv: string[]; assignments: string[]; redirects: string[]; text: string; scope: string };
+export type Part = { argv: string[]; assignments: string[]; redirects: string[]; inputs: string[]; globs: boolean[]; dynamic: boolean[]; redirectGlobs: boolean[]; inputGlobs: boolean[]; text: string; scope: string };
 export type ParseResult = { parts: Part[]; unsafe?: string };
 
 type State = { unsafe?: string };
 type Heredoc = { term: string; strip: boolean; expand: boolean };
-type Mode = null | "redir" | "skip" | "heredoc";
+type Mode = null | "redir" | "input" | "skip" | "heredoc";
 
 const PLACEHOLDER = "$(…)";
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
@@ -51,8 +51,15 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
   let argv: string[] = [];
   let assignments: string[] = [];
   let redirects: string[] = [];
+  let redirectGlobs: boolean[] = [];
+  let inputs: string[] = [];
+  let inputGlobs: boolean[] = [];
+  let globs: boolean[] = [];
+  let dynamic: boolean[] = [];
   let inner: Part[] = [];
   let w = "";
+  let wordGlob = false;
+  let wordDynamic = false;
   let inWord = false;
   let quoted = false;
   let qAt = -1; // length of the unquoted prefix of the current word
@@ -67,16 +74,30 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
   const endWord = () => {
     if (!inWord) return;
     if (mode === "redir") {
-      if (w !== "/dev/null") redirects.push(w);
+      if (!/^\/dev\/(?:null|stdout|stderr|tty|fd\/\d+)$/.test(w)) {
+        redirects.push(w);
+        redirectGlobs.push(wordGlob);
+      }
+    } else if (mode === "input") {
+      if (!/^\/dev\/(?:null|stdin|stdout|stderr|tty|fd\/\d+)$/.test(w)) {
+        inputs.push(w);
+        inputGlobs.push(wordGlob);
+      }
     } else if (mode === "heredoc") {
       heredocs.push({ term: w, strip: hdStrip, expand: !quoted });
     } else if (mode === null) {
       const raw = qAt < 0 ? w : w.slice(0, qAt);
       const atStart = argv.length === 0;
       if (atStart && ASSIGNMENT.test(raw)) assignments.push(w);
-      else if (!(atStart && !quoted && RESERVED.has(w))) argv.push(w);
+      else if (!(atStart && !quoted && RESERVED.has(w))) {
+        argv.push(w);
+        globs.push(wordGlob);
+        dynamic.push(wordDynamic);
+      }
     }
     w = "";
+    wordGlob = false;
+    wordDynamic = false;
     inWord = false;
     quoted = false;
     qAt = -1;
@@ -89,14 +110,22 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
   const endCmd = () => {
     endWord();
     if (mode === "heredoc") flag(st, "heredoc without delimiter");
+    if (mode === "redir" || mode === "input") flag(st, `redirect without target`);
     mode = null;
     if (argv.length > 0) checkRunner(argv, stdinFed, st);
     stdinFed = false;
-    if (argv.length > 0 || redirects.length > 0) out.push({ argv, assignments, redirects, text: argv.join(" "), scope: scopes[scopes.length - 1].id });
+    if (argv.length > 0 || redirects.length > 0 || inputs.length > 0 || assignments.length > 0) {
+      out.push({ argv, assignments, redirects, inputs, globs, dynamic, redirectGlobs, inputGlobs, text: argv.length ? argv.join(" ") : assignments.join(" "), scope: scopes[scopes.length - 1].id });
+    }
     out.push(...inner);
     argv = [];
     assignments = [];
     redirects = [];
+    redirectGlobs = [];
+    inputs = [];
+    inputGlobs = [];
+    globs = [];
+    dynamic = [];
     inner = [];
   };
   const mark = () => {
@@ -105,6 +134,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
   };
   const sub = (parts: Part[]) => {
     w += PLACEHOLDER;
+    wordDynamic = true;
     inWord = true;
     inner.push(...parts);
   };
@@ -125,21 +155,74 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
     sub(r.parts);
     i = r.end;
   };
+  const parameterExpansion = () => {
+    let depth = 1;
+    let end = i + 2;
+    for (; end < s.length; end++) {
+      if (s[end] === "\\") end++;
+      else if (s[end] === "$" && s[end + 1] === "{") { depth++; end++; }
+      else if (s[end] === "}" && --depth === 0) break;
+    }
+    if (end >= s.length) {
+      flag(st, "unterminated parameter expansion");
+      i = s.length;
+      return;
+    }
+    const body = s.slice(i + 2, end);
+    wordDynamic = true;
+    if (body.includes("$(") || body.includes("`")) flag(st, "command substitution in parameter expansion");
+    if (body.includes("=")) flag(st, "parameter expansion assignment");
+    if (body.startsWith("!")) flag(st, "indirect parameter expansion");
+    for (const index of body.matchAll(/\[([^\]]*)\]/g)) {
+      if (/[A-Za-z_]/.test(index[1])) flag(st, "variable array index expansion");
+    }
+    const colon = body.indexOf(":");
+    if (colon >= 0) {
+      const offset = body.slice(colon + 1);
+      if (!/^[-+=?]/.test(offset)) {
+        const [start, length, ...rest] = offset.split(":");
+        if (!/^\s*[+-]?\d+\s*$/.test(start) || (length !== undefined && !/^\s*[+-]?\d+\s*$/.test(length)) || rest.length > 0) {
+          flag(st, "parameter expansion uses a dynamic substring offset");
+        }
+      }
+    }
+    w += "$";
+    inWord = true;
+    i++;
+  };
+  const dollarBracket = () => {
+    const end = s.indexOf("]", i + 2);
+    if (end < 0) {
+      flag(st, "unterminated arithmetic expansion");
+      i = s.length;
+      return;
+    }
+    const body = s.slice(i + 2, end);
+    wordDynamic = true;
+    if (/[A-Za-z_]/.test(body)) flag(st, "arithmetic expansion references variables");
+    w += "$[ … ]";
+    inWord = true;
+    i = end + 1;
+  };
   // $(( … )): consume to the balanced "))" without emitting a part; nested
   // substitutions inside still produce parts.
   const arith = () => {
+    wordDynamic = true;
     let j = i + 3;
     let d = 0;
+    let body = "";
     while (j < s.length) {
       const c = s[j];
       if (c === "$" && s[j + 1] === "(") {
         const r = scan(s, st, j + 2, ")", childScope());
         inner.push(...r.parts);
+        body += "$(…)";
         j = r.end;
       } else if (c === "`") {
         const r = readBacktick(s, j + 1);
         if (r.end < 0) break;
         inner.push(...scan(r.text, st, 0, null, childScope()).parts);
+        body += "`…`";
         j = r.end;
       } else if (c === "(") {
         d++;
@@ -149,12 +232,16 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
           d--;
           j++;
         } else if (s[j + 1] === ")") {
+          if (/[A-Za-z_]/.test(body)) flag(st, "arithmetic expansion references variables");
           w += "$((…))";
           inWord = true;
           i = j + 2;
           return;
         } else break;
-      } else j++;
+      } else {
+        body += c;
+        j++;
+      }
     }
     flag(st, "unterminated arithmetic expansion");
     i = s.length;
@@ -222,6 +309,9 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
           else w += d + e;
           i += 2;
         } else if (d === "$" && s[i + 1] === "(") dollarParen();
+        else if (d === "$" && s[i + 1] === "{") parameterExpansion();
+        else if (d === "$" && s[i + 1] === "[") dollarBracket();
+        else if (d === "$" && /[A-Za-z0-9_?$@*#!-]/.test(s[i + 1] ?? "")) { wordDynamic = true; w += d; i++; }
         else if (d === "`") backtick();
         else {
           w += d;
@@ -231,6 +321,15 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
       if (!closed) flag(st, "unterminated double quote");
     } else if (c === "$" && n === "(") {
       dollarParen();
+    } else if (c === "$" && n === "{") {
+      parameterExpansion();
+    } else if (c === "$" && n === "[") {
+      dollarBracket();
+    } else if (c === "$" && /[A-Za-z0-9_?$@*#!-]/.test(n ?? "")) {
+      wordDynamic = true;
+      w += c;
+      inWord = true;
+      i++;
     } else if (c === "`") {
       backtick();
     } else if (c === "#" && !inWord) {
@@ -260,6 +359,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
         i += n === "&" ? 2 : 1;
       }
     } else if (c === ">" || c === "<") {
+      if ((mode === "redir" || mode === "input") && !inWord) flag(st, "redirect without target");
       if (n === "(") {
         flag(st, "process substitution");
         endCmd();
@@ -301,15 +401,24 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
         const m = FD_DUP.exec(s.slice(j + 1));
         j += 1 + (m ? m[0].length : 0);
         mode = m ? null : "skip";
-      } else mode = "skip";
+      } else {
+        mode = "input";
+      }
       i = j;
     } else {
+      if ("*?[".includes(c)) wordGlob = true;
+      if (c === "{" && s[i - 1] !== "$") {
+        const close = s.indexOf("}", i + 1);
+        const body = close < 0 ? "" : s.slice(i + 1, close);
+        if (body.includes(",") || body.includes("..")) wordGlob = true;
+      }
       w += c;
       inWord = true;
       i++;
     }
   }
   if (closer === ")") flag(st, "unterminated $(");
+  if (depth > 0) flag(st, "unmatched (");
   return { parts: finish(), end: s.length };
 
   function finish(): Part[] {

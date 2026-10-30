@@ -26,7 +26,7 @@ const DANGEROUS_ASSIGNMENT = /^(?:LD_.*|DYLD_.*|GIT_.*|SSH_.*|PATH|PAGER|.*_PAGE
 
 function physical(path: string): string {
   const absolute = resolve(path);
-  if (existsSync(absolute)) return realpathSync(absolute);
+  if (existsSync(absolute)) return realpathSync.native(absolute);
   const parent = dirname(absolute);
   if (parent === absolute) return absolute;
   return join(physical(parent), basename(absolute));
@@ -94,6 +94,9 @@ function evaluatePath(path: string, family: "Read" | "Edit", env: Env, outside =
   if (deny) return evaluated(kind, absolute, "deny", deny.text);
 
   if (family === "Edit" && env.mode === "plan") return evaluated(kind, absolute, "deny", "plan mode");
+  if (family === "Edit" && /(?:^|\/)\.git(?:\/|$)/.test(absolute)) {
+    return evaluated(kind, absolute, "ask", "built-in .git protection");
+  }
   const ask = pathRule(env.config.ask, family, absolute, root);
   if (ask) return evaluated(kind, absolute, "ask", ask.text);
   if (family === "Read") return evaluated(kind, absolute, "allow", "read tool");
@@ -117,7 +120,20 @@ function dangerousAssignment(part: Part): string | undefined {
 }
 
 function evaluatePart(part: Part, env: Env): Evaluation {
-  if (part.argv.length === 0) return evaluated("part", part.text, "allow", "empty command part");
+  if (part.argv.length === 0) {
+    if (part.assignments.length > 0) {
+      if (env.mode === "plan") return evaluated("part", part.text, "deny", "plan mode");
+      const deny = partRule(env.config.deny, part);
+      if (deny) return evaluated("part", part.text, "deny", deny.text);
+      const ask = partRule(env.config.ask, part);
+      if (ask) return evaluated("part", part.text, "ask", ask.text);
+      return evaluated("part", part.text, "ask", "assignment statement");
+    }
+    if (part.redirects.length > 0 || part.inputs.length > 0) {
+      return evaluated("part", part.text, env.mode === "plan" ? "deny" : "ask", env.mode === "plan" ? "plan mode" : "unparsed: empty command");
+    }
+    return evaluated("part", part.text, "allow", "empty command part");
+  }
   if (env.mode === "plan" && !isReadOnly(part, env.config.readOnlyCommands)) {
     return evaluated("part", part.text, "deny", "plan mode");
   }
@@ -142,8 +158,8 @@ function homePath(path: string): string | null {
   return path.startsWith("~") ? null : path;
 }
 
-function redirectPath(target: string, dir: string | null): { path: string; outside: boolean } {
-  if (target.includes("$")) return { path: resolve("/", target), outside: true };
+function redirectPath(target: string, dir: string | null, glob = false): { path: string; outside: boolean } {
+  if (glob || target.includes("$")) return { path: resolve(dir ?? "/", target), outside: true };
   const expanded = homePath(target);
   if (expanded === null) return { path: resolve("/", target), outside: true };
   if (isAbsolute(expanded)) return { path: physical(expanded), outside: false };
@@ -153,12 +169,105 @@ function redirectPath(target: string, dir: string | null): { path: string; outsi
 }
 
 function cdDirectory(part: Part, dir: string | null): string | null {
-  if (basename(part.argv[0] ?? "") !== "cd") return dir;
+  if (part.argv[0] !== "cd") return dir;
   const args = part.argv.slice(1);
-  if (args.length !== 1 || args[0] === "-" || args[0].includes("$")) return null;
+  if (args.length !== 1 || args[0] === "-" || args[0].includes("$") || part.globs[1]) return null;
   const target = homePath(args[0]);
   if (target === null || (dir === null && !isAbsolute(target))) return null;
   return physical(resolve(dir ?? "/", target));
+}
+
+function readOperandIndexes(part: Part): number[] {
+  const command = part.argv[0];
+  if (!["cat", "head", "tail", "wc", "grep", "rg", "fd", "find", "ls", "sort", "uniq", "file", "stat", "du", "df", "diff", "cmp", "sed", "awk", "jq"].includes(command)) return [];
+  const indexes: number[] = [];
+  const positionals: number[] = [];
+  let options = true;
+  let patternFromOption = false;
+  if (command === "cat") {
+    for (let i = 1; i < part.argv.length; i++) {
+      if (part.argv[i] === "--" && options) { options = false; continue; }
+      if (!options || !part.argv[i].startsWith("-")) positionals.push(i);
+    }
+    return positionals;
+  }
+  if (command === "grep" || command === "rg") {
+    const valueOptions = new Set(["A", "B", "C", "m", ...(command === "rg" ? ["g", "t"] : [])]);
+    for (let i = 1; i < part.argv.length; i++) {
+      const arg = part.argv[i];
+      if (options && arg === "--") { options = false; continue; }
+      if (options && arg.startsWith("--")) {
+        const equals = arg.indexOf("=");
+        const option = equals < 0 ? arg : arg.slice(0, equals);
+        if (option === "--file" || option === "--regexp") {
+          patternFromOption = true;
+          if (option === "--file") {
+            if (equals >= 0) indexes.push(i);
+            else if (part.argv[i + 1] !== undefined) indexes.push(++i);
+          } else if (equals < 0 && part.argv[i + 1] !== undefined) i++;
+        } else if (["--after-context", "--before-context", "--context", "--max-count", ...(command === "rg" ? ["--glob", "--type"] : [])].includes(option)
+          && equals < 0 && part.argv[i + 1] !== undefined) i++;
+        continue;
+      }
+      if (options && /^-[A-Za-z]/.test(arg)) {
+        let consumed = false;
+        for (let j = 1; j < arg.length; j++) {
+          const option = arg[j];
+          if (option === "e" || option === "f" || valueOptions.has(option)) {
+            const value = arg.slice(j + 1);
+            if (option === "e" || option === "f") patternFromOption = true;
+            if (option === "f") {
+              if (value) indexes.push(i);
+              else if (part.argv[i + 1] !== undefined) indexes.push(i + 1);
+            }
+            if (value) {
+              if (option === "f") consumed = true;
+            } else if (part.argv[i + 1] !== undefined) {
+              i++;
+            }
+            consumed = true;
+            break;
+          }
+        }
+        if (consumed) continue;
+        continue;
+      }
+      if (options && arg.startsWith("-")) continue;
+      positionals.push(i);
+    }
+    if (!patternFromOption) positionals.shift();
+    return [...indexes, ...positionals];
+  }
+  const takesValue = new Set(["-n", "-c", "--lines", "--bytes", "-e", "--regexp", "-f", "--file", "-A", "-B", "-C", "-m", "--max-count", "-g", "--glob", "-t", "--type", "-k", "--key", "-S", "--parallel", "--buffer-size", "--field-separator", "--format", "--printf", "--separator", "--exclude", "--files-from"]);
+  for (let i = 1; i < part.argv.length; i++) {
+    const arg = part.argv[i];
+    if (options && arg === "--") { options = false; continue; }
+    if (command === "find" && options && arg.startsWith("-")) break;
+    if (options && arg.startsWith("-")) {
+      const option = arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
+      if (takesValue.has(option) && !arg.includes("=") && part.argv[i + 1] !== undefined) i++;
+      continue;
+    }
+    positionals.push(i);
+  }
+  if (["fd"].includes(command) && !patternFromOption) positionals.shift();
+  if (["sed", "awk", "jq"].includes(command)) positionals.shift();
+  indexes.push(...positionals);
+  return indexes;
+}
+
+function readOperandPaths(part: Part): { path: string; index: number }[] {
+  return readOperandIndexes(part).map((index) => {
+    const arg = part.argv[index];
+    if (["grep", "rg"].includes(part.argv[0]) && arg.startsWith("--file=")) {
+      return { path: arg.slice("--file=".length), index };
+    }
+    if (["grep", "rg"].includes(part.argv[0]) && arg.startsWith("-") && !arg.startsWith("--")) {
+      const fileOption = arg.indexOf("f");
+      if (fileOption > 0 && fileOption < arg.length - 1) return { path: arg.slice(fileOption + 1), index };
+    }
+    return { path: arg, index };
+  });
 }
 
 function evaluateBash(call: Call, env: Env): Decision {
@@ -170,11 +279,13 @@ function evaluateBash(call: Call, env: Env): Decision {
   }
 
   const dirs = new Map<string, string | null>([["", physical(env.cwd)]]);
+  const seenCd = new Map<string, boolean>([["", false]]);
   const dirFor = (scope: string): string | null => {
     if (dirs.has(scope)) return dirs.get(scope) ?? null;
     const parentEnd = scope.lastIndexOf("/");
     const parent = parentEnd < 0 ? "" : scope.slice(0, parentEnd);
     const inherited = dirFor(parent);
+    seenCd.set(scope, seenCd.get(parent) ?? false);
     dirs.set(scope, inherited);
     return inherited;
   };
@@ -182,11 +293,47 @@ function evaluateBash(call: Call, env: Env): Decision {
   for (const part of parsed.parts) {
     const dir = dirFor(part.scope);
     evaluations.push(evaluatePart(part, env));
-    for (const target of part.redirects) {
-      const targetPath = redirectPath(target, dir);
+    for (let index = 0; index < part.redirects.length; index++) {
+      const target = part.redirects[index];
+      const targetPath = redirectPath(target, dir, part.redirectGlobs[index]);
       evaluations.push(evaluatePath(targetPath.path, "Edit", { ...env, cwd: "/" }, targetPath.outside, "redirect"));
     }
-    if (basename(part.argv[0] ?? "") === "cd") dirs.set(part.scope, cdDirectory(part, dir));
+    for (let index = 0; index < part.inputs.length; index++) {
+      const target = part.inputs[index];
+      const expanded = homePath(target);
+      if (target.includes("$") || expanded === null || part.inputGlobs[index] || (dir === null && !isAbsolute(target))) {
+        evaluations.push(evaluated("path", target, "ask", "unresolved input redirect"));
+      } else {
+        evaluations.push(evaluatePath(physical(resolve(dir ?? "/", expanded)), "Read", { ...env, cwd: "/" }, false, "path"));
+      }
+    }
+    if (isReadOnly(part, env.config.readOnlyCommands)) {
+      for (const { path: target, index } of readOperandPaths(part)) {
+        const expanded = homePath(target);
+        if (target.includes("$") || expanded === null || (dir === null && !isAbsolute(target))) {
+          evaluations.push(evaluated("path", target, "ask", "unresolved read operand"));
+        } else {
+          const operand = evaluatePath(physical(resolve(dir ?? "/", expanded)), "Read", { ...env, cwd: "/" });
+          evaluations.push(operand);
+          if (part.globs[index] && operand.verdict === "allow" && [...env.config.ask, ...env.config.deny].some((rule) => rule.tool === "Read")) {
+            evaluations.push(evaluated("path", target, "ask", "glob read operand is unresolved"));
+          }
+        }
+      }
+    }
+    const argv = part.argv;
+    const changesDirectory = argv[0] === "pushd" || argv[0] === "popd"
+      || argv[0] === "cd" || ((argv[0] === "builtin" || argv[0] === "command") && argv[1] === "cd");
+    if (changesDirectory) {
+      if (argv[0] === "cd") {
+        if (seenCd.get(part.scope)) dirs.set(part.scope, null);
+        else dirs.set(part.scope, cdDirectory(part, dir));
+        seenCd.set(part.scope, true);
+      } else {
+        dirs.set(part.scope, null);
+        seenCd.set(part.scope, true);
+      }
+    }
   }
 
   const unsafe = parsed.unsafe === undefined ? undefined
@@ -222,9 +369,19 @@ export function decide(call: Call, env: Env): Decision {
 export function suggestRule(part: Part): string | null {
   if (!part.argv.length || part.assignments.length > 0) return null;
   const first = part.argv[0];
-  const command = basename(first);
-  if (CODE_RUNNERS.has(command)) return null;
+  const command = first;
+  const executable = first.slice(first.lastIndexOf("/") + 1);
+  if (CODE_RUNNERS.has(executable) || ["command", "nohup", "time", "nice", "timeout", "builtin", "awk", "gawk", "sed", "find", "npx"].includes(executable)) return null;
   const second = part.argv[1];
+  const third = part.argv[2];
+  const safeWord = (word: string | undefined) => !!word && !word.startsWith("-") && !word.startsWith(":") && !/[\\/=\'"]/.test(word)
+    && word !== "." && word !== ".." && !word.startsWith("~");
+  if (first === "gh" && safeWord(second) && safeWord(third)) {
+    return `Bash(${first} ${second} ${third}:*)`;
+  }
+  if (first === "git" && ["stash", "remote"].includes(second ?? "") && safeWord(second) && safeWord(third)) {
+    return `Bash(${first} ${second} ${third}:*)`;
+  }
   if (second && !second.startsWith("-") && !second.startsWith(":") && !/[\/=\'\"]/.test(second)
     && second !== "." && second !== ".." && !second.startsWith("~")) {
     return `Bash(${first} ${second}:*)`;

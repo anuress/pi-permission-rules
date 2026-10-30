@@ -42,7 +42,7 @@ export function describe(state: PermissionState): string {
     ignored,
     `Rules: allow ${state.config.allow.length}, ask ${state.config.ask.length}, deny ${state.config.deny.length}`,
     ...(["allow", "ask", "deny"] as const).map((kind) =>
-      `  ${kind}: ${state.config[kind].map((rule) => rule.text).join(", ") || "none"}`,
+      `  ${kind}: ${state.config[kind].map((rule) => `${rule.text} [${state.config.ruleSources.get(rule) ?? "unknown source"}]`).join(", ") || "none"}`,
     ),
     `Mode: ${mode.mode} (origin: ${origin(state)})`,
     `Unattended: ${isUnattended(state.config.unattended, state.hasUI, state.processEnv) ? "yes" : "no"}`,

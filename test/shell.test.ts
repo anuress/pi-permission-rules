@@ -129,16 +129,62 @@ test("parse errors are unsafe", () => {
 });
 
 test("fuzz never throws", () => {
+  const seed = 0x5eed1234;
+  let state = seed;
   const alpha = ["a", "'", '"', "`", "$", "(", ")", "<", ">", "|", "&", ";", "\\", "\n", " ", "#", "="];
   for (let i = 0; i < 2000; i++) {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
     let s = "";
-    const n = Math.floor(Math.random() * 30);
-    for (let j = 0; j < n; j++) s += alpha[Math.floor(Math.random() * alpha.length)];
+    const n = state % 30;
+    for (let j = 0; j < n; j++) {
+      state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+      s += alpha[state % alpha.length];
+    }
     const r = parse(s);
-    if (r.unsafe !== undefined) assert.ok(typeof r.unsafe === "string" && r.unsafe.length > 0, s);
+    if (r.unsafe !== undefined) assert.ok(typeof r.unsafe === "string" && r.unsafe.length > 0, `seed=${seed} input=${JSON.stringify(s)}`);
     for (const p of r.parts) {
-      assert.ok(p.argv.length > 0 || p.redirects.length > 0, s);
-      assert.equal(p.text, p.argv.join(" "), s);
+      assert.ok(p.argv.length > 0 || p.redirects.length > 0 || p.inputs.length > 0 || p.assignments.length > 0, `seed=${seed} input=${JSON.stringify(s)}`);
+      assert.equal(p.text, p.argv.length ? p.argv.join(" ") : p.assignments.join(" "), `seed=${seed} input=${JSON.stringify(s)}`);
     }
   }
+});
+
+test("assignments-only statements and arithmetic/code expansions are retained and unsafe", () => {
+  const assignment = parse("PATH=/tmp/evil").parts[0];
+  assert.deepEqual(assignment.argv, []);
+  assert.deepEqual(assignment.assignments, ["PATH=/tmp/evil"]);
+  assert.equal(assignment.text, "PATH=/tmp/evil");
+  for (const command of [
+    "echo $((x))", "echo ${y[x]}", "echo $[x+1]", "echo ${x:=value}", "echo ${x=value}",
+    "echo $((1+2))",
+  ]) {
+    if (command === "echo $((1+2))") assert.equal(parse(command).unsafe, undefined, command);
+    else assert.ok(parse(command).unsafe, command);
+  }
+});
+
+test("lexer records input redirects and unquoted glob provenance", () => {
+  const parsed = parse("cat < local.properties > *.out");
+  assert.deepEqual(parsed.parts[0].inputs, ["local.properties"]);
+  assert.deepEqual(parsed.parts[0].redirects, ["*.out"]);
+  assert.deepEqual(parsed.parts[0].redirectGlobs, [true]);
+  assert.deepEqual(parse("cat *.md").parts[0].globs, [false, true]);
+  assert.deepEqual(parse("cat '*.md'").parts[0].globs, [false, false]);
+  assert.deepEqual(parse("sed $x f").parts[0].dynamic, [false, true, false]);
+  assert.deepEqual(parse("awk '$1' f").parts[0].dynamic, [false, false, false]);
+});
+
+test("substring offsets, indirect expansion and variable array indexes are unsafe; literal indexes are not", () => {
+  for (const command of ["echo ${s:x}", "echo ${arr[@]:z}", "echo ${!x}", "echo ${#a[i]}"]) {
+    assert.ok(parse(command).unsafe, command);
+  }
+  for (const command of ["echo ${s:1}", "echo ${s: -1}", "echo ${arr[0]}", "echo ${arr[@]}", "echo ${x:-default}"]) {
+    assert.equal(parse(command).unsafe, undefined, command);
+  }
+});
+
+test("unquoted brace expansion is recorded as a glob", () => {
+  assert.deepEqual(parse("cd {/tmp,zz}").parts[0].globs, [false, true]);
+  assert.deepEqual(parse("echo x > {o1,}").parts[0].redirectGlobs, [true]);
+  assert.deepEqual(parse("echo '{a,b}'").parts[0].globs, [false, false]);
 });
