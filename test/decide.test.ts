@@ -360,6 +360,51 @@ test("I4 read rules apply to file operands and input redirects", () => {
   }
 });
 
+test("R37 Read rules check every read-only argument and input redirect", () => {
+  writeFileSync(join(root, "local.properties"), "secret");
+  writeFileSync(join(root, "prog.sed"), "p");
+  writeFileSync(join(root, "prog.awk"), "{print}");
+  const state = env("acceptEdits", { deny: rules("Read(**/local.properties)") });
+  const denied = [
+    "sed -n p local.properties",
+    "sed -n 's/a/b/p' local.properties",
+    "sed -e p local.properties",
+    "jq -f prog.jq local.properties",
+    "cut -c1 local.properties",
+    "sed -f prog.sed local.properties",
+    "awk -f prog.awk local.properties",
+    "grep -e local.properties README.md",
+    "jq --arg=local.properties x . package.json",
+    "cat < local.properties",
+  ];
+  for (const command of denied) {
+    verdict("bash", "deny", { command }, state);
+    verdict("bash", "deny", { command }, { ...state, mode: "plan" });
+  }
+  for (const command of ["sed -n p README.md", "cut -c1 README.md", "jq . package.json"]) {
+    verdict("bash", "allow", { command }, state);
+    verdict("bash", "allow", { command }, { ...state, mode: "plan" });
+  }
+  verdict("bash", "ask", { command: "cut -c1 local.properties" }, env("acceptEdits", { ask: rules("Read(**/local.properties)") }));
+});
+
+test("R38 operand-less cd options make the following directory unknown", () => {
+  mkdirSync(join(root, "sub"), { recursive: true });
+  const state = env("acceptEdits");
+  for (const command of ["cd -P && echo x > f", "cd -L; echo x > f", "cd -LP; echo x > f", "cd -- && echo x > f", "cd -P -- && echo x > f", "pushd -n && echo x > f"]) {
+    verdict("bash", "ask", { command }, state);
+  }
+  verdict("bash", "allow", { command: "cd -P sub && echo x > f" }, state);
+  verdict("bash", "allow", { command: "cd -P -- sub && echo x > f" }, state);
+  verdict("bash", "allow", { command: "cd -LP sub && echo x > f" }, state);
+});
+
+test("R39 gh api suggestions are suppressed without changing gh pr suggestions", () => {
+  assert.equal(suggestRule(parse("gh api repos/o/r").parts[0]), null);
+  assert.equal(suggestRule(parse("gh api -X GET repos/o/r").parts[0]), null);
+  assert.equal(suggestRule(parse("gh pr merge 1").parts[0]), "Bash(gh pr merge:*)");
+});
+
 test("I2 glob redirects and cd targets are unknown; safe glob reads stay read-only", () => {
   verdict("bash", "ask", { command: "echo x > *.txt" }, env("acceptEdits"));
   verdict("bash", "ask", { command: "cd sub* && echo x > out" }, env("acceptEdits"));
