@@ -174,14 +174,14 @@ test("session grants do not override a matching deny rule", async () => {
   await withEnv({}, async () => {
     const { root, agent, handlers, ctx, ui } = setup();
     mkdirSync(agent, { recursive: true });
-    writeFileSync(join(agent, "permissions.json"), JSON.stringify({ permissions: { deny: ["Bash(git push:*)"] } }));
+    writeFileSync(join(agent, "permissions.json"), JSON.stringify({ permissions: { deny: ["Bash(git push origin main)"] } }));
     await handlers.get("session_start")!({}, ctx);
-    ui.answers.push("Yes, and don't ask again for Bash(git:*) in this project");
-    assert.equal(await handlers.get("tool_call")!({ toolName: "bash", input: { command: "git" } }, ctx), undefined);
+    ui.answers.push("Yes, and don't ask again for Bash(git push:*) in this project");
+    assert.equal(await handlers.get("tool_call")!({ toolName: "bash", input: { command: "git push" } }, ctx), undefined);
     const denied = await handlers.get("tool_call")!({ toolName: "bash", input: { command: "git push origin main" } }, ctx);
     assert.deepEqual(denied, {
       block: true,
-      reason: "permission: `git push origin main` is denied (Bash(git push:*)). It was not run. Use a read-only alternative, or report that this step needs the orchestrator.",
+      reason: "permission: `git push origin main` is denied (Bash(git push origin main)). It was not run. Use a read-only alternative, or report that this step needs the orchestrator.",
     });
     assert.equal(ui.selectCalls.length, 1);
     assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" }), "");

@@ -296,7 +296,6 @@ export function decide(call: Call, env: Env): Decision {
 export function suggestRule(part: Part): string | null {
   if (!part.argv.length || part.assignments.length > 0) return null;
   const first = part.argv[0];
-  const command = first;
   const executable = first.slice(first.lastIndexOf("/") + 1);
   if (CODE_RUNNERS.has(executable) || ["command", "nohup", "time", "nice", "timeout", "builtin", "awk", "gawk", "sed", "find", "npx"].includes(executable)
     || (executable === "gh" && part.argv.includes("api"))
@@ -305,17 +304,19 @@ export function suggestRule(part: Part): string | null {
   const third = part.argv[2];
   const safeWord = (word: string | undefined) => !!word && !word.startsWith("-") && !word.startsWith(":") && !/[\\/=\'"]/.test(word)
     && word !== "." && word !== ".." && !word.startsWith("~");
-  if (first === "gh" && safeWord(second) && safeWord(third)) {
+  if (executable === "git" && second === "config") return null;
+  if (!safeWord(second)) return null;
+  if (first === "gh" && safeWord(third)) {
     return `Bash(${first} ${second} ${third}:*)`;
   }
-  if (first === "git" && ["stash", "remote"].includes(second ?? "") && safeWord(second) && safeWord(third)) {
+  if (first === "git" && ["stash", "remote"].includes(second ?? "") && safeWord(third)) {
     return `Bash(${first} ${second} ${third}:*)`;
   }
   if (second && !second.startsWith("-") && !second.startsWith(":") && !/[\/=\'\"]/.test(second)
     && second !== "." && second !== ".." && !second.startsWith("~")) {
     return `Bash(${first} ${second}:*)`;
   }
-  return `Bash(${first}:*)`;
+  return null;
 }
 
 export function resolveMode(env: NodeJS.ProcessEnv, config: Config, session?: Mode): { mode: Mode; warning?: string } {

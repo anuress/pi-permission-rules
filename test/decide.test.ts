@@ -235,8 +235,8 @@ test("suggestRule follows command-name heuristic and suppresses code runners", (
   for (const [command, expected] of [
     ["git push origin x", "Bash(git push:*)"],
     ["npm run build", "Bash(npm run:*)"],
-    ["./gradlew :shop:test", "Bash(./gradlew:*)"],
-    ["curl https://x", "Bash(curl:*)"],
+    ["./gradlew :shop:test", null],
+    ["curl https://x", null],
     ["python3 x.py", null],
     ["npx prettier --write .", null],
   ] as const) {
@@ -411,6 +411,18 @@ test("R40 suggestions handle gh and git global options without broad grants", ()
   }
   assert.equal(suggestRule(parse("git push origin x").parts[0]), "Bash(git push:*)");
   assert.equal(suggestRule(parse("gh pr merge 1").parts[0]), "Bash(gh pr merge:*)");
+});
+
+test("R41 never suggests a one-word persistent rule", () => {
+  for (const command of ["git", "gh", "make", "docker --context x run img", "kubectl --kubeconfig x delete pod", "git config core.pager x"]) {
+    assert.equal(suggestRule(parse(command).parts[0]), null, command);
+  }
+  for (const [command, expected] of [
+    ["./gradlew test", "Bash(./gradlew test:*)"],
+    ["git push origin x", "Bash(git push:*)"],
+    ["npm run build", "Bash(npm run:*)"],
+    ["gh pr merge 1", "Bash(gh pr merge:*)"],
+  ] as const) assert.equal(suggestRule(parse(command).parts[0]), expected, command);
 });
 
 test("R40 Read rules skip command arguments that do not read file contents", () => {
