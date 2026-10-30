@@ -475,6 +475,41 @@ test("R45 outside-project session grant remains below deny, ask, and git protect
   }
 });
 
+test("R46 xargs permits only safe options and bare read-only wrapped commands", () => {
+  const allowed = [
+    "find . -name '*.ts' | xargs grep -ln registerCommand",
+    "xargs -0 -n 5 wc -l",
+    "xargs -n5 grep -ln registerCommand",
+    "xargs -L 3 -P2 -r cat",
+    "xargs --null --no-run-if-empty -d, stat",
+  ];
+  for (const command of allowed) {
+    verdict("bash", "allow", { command }, env("acceptEdits"));
+    verdict("bash", "allow", { command }, env("plan"));
+  }
+
+  const rejected = [
+    "xargs -I{} cat {}", "xargs -i cat", "xargs -a f grep x", "xargs -p cat", "xargs -o cat",
+    "xargs -E end cat", "xargs -e end cat", "xargs -s 10 cat", "xargs --arg-file=f cat",
+    "xargs --replace cat", "xargs --max-args 2 cat", "xargs --no-run-if-empty= cat",
+    "xargs rg x", "xargs sort", "xargs file x", "xargs sed -n p", "xargs find .",
+    "xargs awk '{print}'", "xargs sh -c x", "xargs rm x", "xargs /bin/grep x", "xargs",
+    "xargs -n cat", "xargs -n 0 cat", "xargs grep *.txt", "xargs grep $(echo x)",
+  ];
+  for (const command of rejected) {
+    verdict("bash", "ask", { command }, env("acceptEdits"));
+    verdict("bash", "deny", { command }, env("plan"));
+  }
+
+  for (const ruleset of [rules("Read(**/secret)"), rules("Read")]) {
+    const state = env("acceptEdits", { deny: ruleset });
+    verdict("bash", "ask", { command: "xargs grep x" }, state);
+    verdict("bash", "deny", { command: "xargs grep x" }, { ...state, mode: "plan" });
+  }
+  verdict("bash", "ask", { command: "xargs grep x" }, env("acceptEdits", { ask: rules("Read(**/secret)") }));
+  assert.equal(suggestRule(parse("xargs grep x").parts[0]), null);
+});
+
 test("R40 Read rules skip command arguments that do not read file contents", () => {
   writeFileSync(join(root, "local.properties"), "secret");
   const state = env("acceptEdits", { deny: rules("Read(**/local.properties)") });

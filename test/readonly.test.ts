@@ -22,6 +22,24 @@ const readOnlyCases: [string, boolean][] = [
   ["[ -f file ]", true],
   ["env rm x", false],
   ["/usr/bin/grep x", false],
+  ["xargs", false],
+  ["xargs grep -ln registerCommand", true],
+  ["xargs -0 -n 5 wc -l", true],
+  ["xargs -n5 grep x", true],
+  ["xargs -L 3 cat", true],
+  ["xargs -P2 ls", true],
+  ["xargs -d, stat", true],
+  ["xargs --null --no-run-if-empty grep x", true],
+  ["xargs -I{} cat {}", false],
+  ["xargs -a f grep x", false],
+  ["xargs -p cat", false],
+  ["xargs --arg-file=f cat", false],
+  ["xargs --max-args 2 cat", false],
+  ["xargs --no-run-if-empty= cat", false],
+  ["xargs -n cat", false],
+  ["xargs -n 0 cat", false],
+  ["xargs grep *.txt", false],
+  ["xargs grep $(echo x)", false],
   ["$COMMAND x", false],
   ["GIT_EXTERNAL_DIFF=/x git diff", false],
   ["LD_PRELOAD=/x ls", false],
@@ -251,6 +269,16 @@ const readOnlyCases: [string, boolean][] = [
 test("isReadOnly follows the built-in command allowlist", () => {
   for (const [text, expected] of readOnlyCases) {
     assert.equal(isReadOnly(part(text), []), expected, text || "empty argv");
+  }
+});
+
+test("R46 xargs read-only recognition is blocked by Read rules and stays strict over extras", () => {
+  assert.equal(isReadOnly(part("xargs grep x"), [], false), true);
+  assert.equal(isReadOnly(part("xargs grep x"), [], true), false);
+  assert.equal(isReadOnly(part("xargs grep x"), ["xargs"], true), false);
+  assert.equal(isReadOnly(part("xargs -I{} cat {}"), ["xargs"]), false);
+  for (const command of ["xargs rg x", "xargs sort", "xargs file x", "xargs sed -n p", "xargs find .", "xargs awk '{print}'", "xargs sh -c x", "xargs rm x", "xargs /bin/grep x"]) {
+    assert.equal(isReadOnly(part(command), []), false, command);
   }
 });
 

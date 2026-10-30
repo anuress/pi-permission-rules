@@ -149,6 +149,10 @@ function dangerousAssignment(part: Part): string | undefined {
   return undefined;
 }
 
+function hasReadRules(env: Env): boolean {
+  return [...env.config.ask, ...env.config.deny].some((rule) => rule.tool === "Read");
+}
+
 function evaluatePart(part: Part, env: Env): Evaluation {
   if (part.argv.length === 0) {
     if (part.assignments.length > 0) {
@@ -165,7 +169,7 @@ function evaluatePart(part: Part, env: Env): Evaluation {
     }
     return evaluated("part", part.text, "allow", "empty command part");
   }
-  if (env.mode === "plan" && !isReadOnly(part, env.config.readOnlyCommands)) {
+  if (env.mode === "plan" && !isReadOnly(part, env.config.readOnlyCommands, hasReadRules(env))) {
     return evaluated("part", part.text, "deny", "plan mode");
   }
   const deny = partRule(env.config.deny, part);
@@ -179,7 +183,7 @@ function evaluatePart(part: Part, env: Env): Evaluation {
   if (allow) return evaluated("part", part.text, "allow", `allow rule ${allow.text}`);
   const session = partRule(env.session, part);
   if (session) return evaluated("part", part.text, "allow", `session rule ${session.text}`);
-  if (isReadOnly(part, env.config.readOnlyCommands)) return evaluated("part", part.text, "allow", "read-only");
+  if (isReadOnly(part, env.config.readOnlyCommands, hasReadRules(env))) return evaluated("part", part.text, "allow", "read-only");
   return evaluated("part", part.text, "ask", "no allow rule", suggestRule(part));
 }
 
@@ -255,9 +259,9 @@ function evaluateBash(call: Call, env: Env): Decision {
         evaluations.push(evaluatePath(physical(resolve(dir ?? "/", expanded)), "Read", { ...env, cwd: "/" }, false, "path"));
       }
     }
-    const hasReadRules = [...env.config.ask, ...env.config.deny].some((rule) => rule.tool === "Read");
-    if (hasReadRules && !READ_ARGUMENT_EXEMPT_COMMANDS.has(part.argv[0])
-      && (isReadOnly(part, env.config.readOnlyCommands) || ["sed", "awk"].includes(part.argv[0]))) {
+    const readRulesPresent = hasReadRules(env);
+    if (readRulesPresent && !READ_ARGUMENT_EXEMPT_COMMANDS.has(part.argv[0])
+      && (isReadOnly(part, env.config.readOnlyCommands, readRulesPresent) || ["sed", "awk"].includes(part.argv[0]))) {
       let options = true;
       for (const [index, arg] of part.argv.slice(1).entries()) {
         if (options && arg === "--") {

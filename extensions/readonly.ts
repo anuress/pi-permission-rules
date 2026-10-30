@@ -16,11 +16,12 @@ export const CODE_RUNNERS: ReadonlySet<string> = new Set([
   "bash", "sh", "zsh", "python", "python3", "node", "ruby", "perl", "eval", "sudo", "xargs", "env", "exec", "source", ".",
 ]);
 
-export function isReadOnly(part: Part, extra: readonly string[]): boolean {
+export function isReadOnly(part: Part, extra: readonly string[], hasReadRules = false): boolean {
   if (part.assignments.length > 0) return false;
   const first = part.argv[0];
   if (first === undefined) return true;
   if (first.includes("$")) return false;
+  if (first === "xargs") return xargsIsReadOnly(part, hasReadRules);
   if (extra.includes(first)) return true;
   if (first.includes("/")) return false;
 
@@ -35,6 +36,42 @@ export function isReadOnly(part: Part, extra: readonly string[]): boolean {
   if (command === "git") return gitIsReadOnly(part.argv.slice(1));
   if (command === "gh") return ghIsReadOnly(part.argv.slice(1));
   return false;
+}
+
+const XARGS_COMMANDS = new Set(["grep", "egrep", "fgrep", "cat", "wc", "head", "tail", "ls", "stat", "du"]);
+
+function xargsIsReadOnly(part: Part, hasReadRules: boolean): boolean {
+  if (hasReadRules || part.globs?.slice(1).some(Boolean) || part.dynamic?.slice(1).some(Boolean)) return false;
+  const args = part.argv.slice(1);
+  let i = 0;
+  while (i < args.length && args[i].startsWith("-")) {
+    const option = args[i];
+    if (["-0", "--null", "-r", "--no-run-if-empty"].includes(option)) {
+      i++;
+      continue;
+    }
+    if (option.startsWith("--")) return false;
+    const valueOption = ["-n", "-L", "-P", "-d"].find((candidate) => option === candidate || option.startsWith(candidate) && option.length > candidate.length);
+    if (!valueOption) return false;
+    const value = option === valueOption ? args[++i] : option.slice(valueOption.length);
+    if (!value) return false;
+    if (valueOption !== "-d") {
+      if (!/^\d+$/.test(value)) return false;
+      const number = Number(value);
+      if (!Number.isSafeInteger(number) || (valueOption !== "-P" && number < 1)) return false;
+    }
+    i++;
+  }
+  const command = args[i];
+  if (!command || command.includes("/") || !XARGS_COMMANDS.has(command)) return false;
+  const argv = args.slice(i);
+  const wrapped: Part = {
+    argv: [command === "egrep" || command === "fgrep" ? "grep" : command, ...argv.slice(1)],
+    assignments: [], redirects: [], inputs: [],
+    globs: part.globs.slice(i + 1), dynamic: part.dynamic.slice(i + 1),
+    redirectGlobs: [], inputGlobs: [], text: argv.join(" "), scope: part.scope,
+  };
+  return isReadOnly(wrapped, []);
 }
 
 function longOptionName(arg: string): string {
