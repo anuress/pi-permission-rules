@@ -64,7 +64,7 @@ test("explain includes redirect targets and fails closed on unsafe parses", () =
 
   assert.match(explain("echo x > out", env), /redirect .*\/out → ask \(no allow rule\)/i);
   const variableRedirect = explain("echo x > $OUT", env);
-  assert.ok(variableRedirect.includes(`redirect ${join(root, "$OUT")} → ask (no allow rule)`));
+  assert.ok(variableRedirect.includes(`redirect ${join(realpathSync(root), "$OUT")} → ask (no allow rule)`));
   assert.match(variableRedirect, /Overall: ask/);
   assert.match(explain("echo 'unterminated", env), /tool echo 'unterminated → ask \(unparsed:/i);
 });
