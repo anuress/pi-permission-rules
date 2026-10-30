@@ -303,6 +303,11 @@ export function suggestRule(part: Part): string | null {
     || (["gh", "git"].includes(executable) && part.argv[1]?.startsWith("-"))) return null;
   const second = part.argv[1];
   const third = part.argv[2];
+  const dynamicOrGlob = (index: number) => {
+    const word = part.argv[index] ?? "";
+    return word.includes("$") || word.includes("`") || part.dynamic?.[index] === true || part.globs?.[index] === true;
+  };
+  if (dynamicOrGlob(1) || ((executable === "gh" || executable === "git") && dynamicOrGlob(2))) return null;
   const safeWord = (word: string | undefined) => !!word && !word.startsWith("-") && !word.startsWith(":") && !/[\\/=\'"]/.test(word)
     && word !== "." && word !== ".." && !word.startsWith("~");
   if (executable === "git" && second === "config") return null;

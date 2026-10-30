@@ -234,6 +234,7 @@ test("repo config entries stay inert in the decision engine (only supplied deny 
 test("suggestRule follows command-name heuristic and suppresses code runners", () => {
   for (const [command, expected] of [
     ["git push origin x", "Bash(git push:*)"],
+    ["rm a.txt", "Bash(rm a.txt:*)"],
     ["npm run build", "Bash(npm run:*)"],
     ["./gradlew :shop:test", null],
     ["curl https://x", null],
@@ -253,6 +254,9 @@ test("suggestRule follows command-name heuristic and suppresses code runners", (
     ["git remote add origin url", "Bash(git remote add:*)"],
   ] as const) assert.equal(suggestRule(parse(command).parts[0]), expected, command);
   assert.equal(suggestRule(parse("FOO=1 ls").parts[0]), null);
+  for (const command of ['rm "$f"', 'git push "$REMOTE" x', "rm *.txt", "rm `echo file`", "rm $(echo file)", "rm $((1+2))"]) {
+    assert.equal(suggestRule(parse(command).parts[0]), null, command);
+  }
   assert.equal(suggestRule(parse("").parts[0] ?? { argv: [], assignments: [], redirects: [], inputs: [], globs: [], dynamic: [], redirectGlobs: [], inputGlobs: [], text: "", scope: "" }), null);
 });
 
@@ -514,6 +518,7 @@ test("for and select loops evaluate only their bodies and substitutions", () => 
 
   const rm = verdict("bash", "ask", { command: "for f in a b; do rm \"$f\"; done" }, env("acceptEdits"));
   assert.ok(rm.flags.some((flag) => flag.label === "rm $f"));
+  assert.equal(rm.flags.find((flag) => flag.label === "rm $f")?.suggestion, null);
   assert.ok(rm.flags.every((flag) => !flag.label.includes("for") && !flag.suggestion?.includes("for")));
   verdict("bash", "ask", { command: "for f in $(curl x); do echo $f; done" }, env("acceptEdits"));
   verdict("bash", "ask", { command: "for f in a; do echo x > /etc/f; done" }, env("acceptEdits"));
