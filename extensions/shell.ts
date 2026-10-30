@@ -1,7 +1,7 @@
 // Shell lexer: splits a bash command into parts so rules match per sub-command,
 // never against raw text. Fails closed (`unsafe`) on anything it cannot vouch for.
 
-export type Part = { argv: string[]; assignments: string[]; redirects: string[]; inputs: string[]; globs: boolean[]; dynamic: boolean[]; redirectGlobs: boolean[]; inputGlobs: boolean[]; text: string; scope: string };
+export type Part = { argv: string[]; assignments: string[]; redirects: string[]; inputs: string[]; globs: boolean[]; dynamic: boolean[]; redirectGlobs: boolean[]; inputGlobs: boolean[]; text: string; scope: string; compoundRedirect?: boolean };
 export type ParseResult = { parts: Part[]; unsafe?: string };
 
 type State = { unsafe?: string };
@@ -67,6 +67,10 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
   let mode: Mode = null;
   let hdStrip = false;
   let depth = 0;
+  let loopHeader = false;
+  let compoundEndPending = false;
+  let compoundRedirect = false;
+  const cases: { phase: "subject" | "patterns" | "body"; patternStarted: boolean }[] = [];
   const scopes: { id: string; children: number }[] = [{ id: scope, children: 0 }];
   const heredocs: Heredoc[] = [];
   let i = start;
@@ -88,8 +92,35 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
     } else if (mode === null) {
       const raw = qAt < 0 ? w : w.slice(0, qAt);
       const atStart = argv.length === 0;
-      if (atStart && ASSIGNMENT.test(raw)) assignments.push(w);
-      else if (!(atStart && !quoted && RESERVED.has(w))) {
+      const controlStart = atStart && assignments.length === 0;
+      const caseState = cases[cases.length - 1];
+      if (controlStart && !quoted && (w === "for" || w === "select")) {
+        loopHeader = true;
+        compoundEndPending = false;
+      } else if (loopHeader && atStart) {
+        if (!quoted && w === "do") loopHeader = false;
+      } else if (controlStart && !quoted && w === "case") {
+        cases.push({ phase: "subject", patternStarted: false });
+        compoundEndPending = false;
+      } else if (controlStart && !quoted && w === "esac") {
+        if (caseState && caseState.phase !== "subject") cases.pop();
+        else flag(st, "esac without case body");
+        compoundEndPending = true;
+      } else if (caseState?.phase === "subject") {
+        if (!quoted && w === "in") caseState.phase = "patterns";
+      } else if (caseState?.phase === "patterns") {
+        caseState.patternStarted = true;
+      } else if (controlStart && !quoted && w === "}") {
+        compoundEndPending = true;
+      } else if (controlStart && !quoted && (w === "fi" || w === "done")) {
+        compoundEndPending = true;
+      } else if (controlStart && !quoted && RESERVED.has(w)) {
+        compoundEndPending = false;
+      } else if (atStart && ASSIGNMENT.test(raw)) {
+        compoundEndPending = false;
+        assignments.push(w);
+      } else {
+        compoundEndPending = false;
         argv.push(w);
         globs.push(wordGlob);
         dynamic.push(wordDynamic);
@@ -115,7 +146,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
     if (argv.length > 0) checkRunner(argv, stdinFed, st);
     stdinFed = false;
     if (argv.length > 0 || redirects.length > 0 || inputs.length > 0 || assignments.length > 0) {
-      out.push({ argv, assignments, redirects, inputs, globs, dynamic, redirectGlobs, inputGlobs, text: argv.length ? argv.join(" ") : assignments.join(" "), scope: scopes[scopes.length - 1].id });
+      out.push({ argv, assignments, redirects, inputs, globs, dynamic, redirectGlobs, inputGlobs, text: argv.length ? argv.join(" ") : assignments.join(" "), scope: scopes[scopes.length - 1].id, ...(compoundRedirect ? { compoundRedirect: true } : {}) });
     }
     out.push(...inner);
     argv = [];
@@ -126,6 +157,12 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
     inputGlobs = [];
     globs = [];
     dynamic = [];
+    inner = [];
+    compoundRedirect = false;
+    compoundEndPending = false;
+  };
+  const flushControlInner = () => {
+    out.push(...inner);
     inner = [];
   };
   const mark = () => {
@@ -246,6 +283,57 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
     flag(st, "unterminated arithmetic expansion");
     i = s.length;
   };
+  const arithmeticFor = () => {
+    let j = i + 2;
+    let nested = 0;
+    let body = "";
+    while (j < s.length) {
+      const c = s[j];
+      if (c === "$" && s[j + 1] === "(") {
+        if (s[j + 2] === "(") {
+          flag(st, "nested arithmetic in for header");
+          const end = s.indexOf("))", j + 3);
+          if (end < 0) break;
+          body += "$(())";
+          j = end + 2;
+        } else {
+          const r = scan(s, st, j + 2, ")", childScope());
+          inner.push(...r.parts);
+          body += "$(…)";
+          j = r.end;
+        }
+      } else if (c === "`") {
+        const r = readBacktick(s, j + 1);
+        if (r.end < 0) break;
+        inner.push(...scan(r.text, st, 0, null, childScope()).parts);
+        body += "`…`";
+        j = r.end;
+      } else if (c === "(") {
+        nested++;
+        j++;
+      } else if (c === ")") {
+        if (nested > 0) {
+          nested--;
+          j++;
+        } else if (s[j + 1] === ")") {
+          if (/[A-Za-z_]/.test(body)) flag(st, "arithmetic expansion references variables");
+          i = j + 2;
+          return;
+        } else break;
+      } else if (c === "$" && s[j + 1] === "{") {
+        flag(st, "parameter expansion in for arithmetic");
+        const end = s.indexOf("}", j + 2);
+        if (end < 0) break;
+        body += "${…}";
+        j = end + 1;
+      } else {
+        body += c;
+        j++;
+      }
+    }
+    flag(st, "unterminated arithmetic for header");
+    i = s.length;
+  };
   const eatHeredocs = () => {
     for (const hd of heredocs.splice(0)) {
       let found = false;
@@ -270,7 +358,12 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
       endWord();
       i++;
     } else if (c === "\n") {
-      endCmd();
+      if (loopHeader) {
+        endWord();
+        flushControlInner();
+      } else {
+        endCmd();
+      }
       i++;
       eatHeredocs();
     } else if (c === "\\") {
@@ -334,24 +427,60 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
       backtick();
     } else if (c === "#" && !inWord) {
       while (i < s.length && s[i] !== "\n") i++;
+    } else if (c === "(" && loopHeader && !inWord && s[i + 1] === "(") {
+      arithmeticFor();
     } else if (c === "(" || c === ")") {
-      endCmd();
-      if (c === "(") {
-        depth++;
-        const id = childScope();
-        scopes.push({ id, children: 0 });
-      } else if (depth > 0) {
-        depth--;
-        scopes.pop();
-      } else if (closer === ")") return { parts: finish(), end: i + 1 };
-      else flag(st, "unmatched )");
-      i++;
+      const caseState = cases[cases.length - 1];
+      if (c === ")" && caseState?.phase === "patterns") {
+        endWord();
+        flushControlInner();
+        caseState.phase = "body";
+        caseState.patternStarted = false;
+        i++;
+      } else if (c === "(" && caseState?.phase === "patterns") {
+        endWord();
+        if (caseState.patternStarted) flag(st, "unsupported case pattern parentheses");
+        i++;
+      } else {
+        endCmd();
+        if (c === "(") {
+          depth++;
+          const id = childScope();
+          scopes.push({ id, children: 0 });
+        } else if (depth > 0) {
+          depth--;
+          scopes.pop();
+          compoundEndPending = true;
+        } else if (closer === ")") return { parts: finish(), end: i + 1 };
+        else flag(st, "unmatched )");
+        i++;
+      }
     } else if (c === ";" || c === "|") {
-      endCmd();
-      i++;
+      const caseState = cases[cases.length - 1];
+      if (loopHeader) {
+        endWord();
+        flushControlInner();
+        i++;
+      } else if (c === "|" && caseState?.phase === "patterns") {
+        endWord();
+        i++;
+      } else if (c === ";" && caseState?.phase === "body" && (n === ";" || n === "&")) {
+        endCmd();
+        if (n === ";" && s[i + 2] === "&") i += 3;
+        else i += 2;
+        caseState.phase = "patterns";
+        caseState.patternStarted = false;
+      } else {
+        endCmd();
+        i++;
+      }
     } else if (c === "&") {
       if (n === ">") {
         endWord();
+        if (compoundEndPending && argv.length === 0) {
+          compoundRedirect = true;
+          compoundEndPending = false;
+        }
         i += s[i + 2] === ">" ? 3 : 2;
         mode = "redir";
       } else {
@@ -373,6 +502,10 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
         w = "";
         inWord = false;
       } else endWord();
+      if (compoundEndPending && argv.length === 0) {
+        compoundRedirect = true;
+        compoundEndPending = false;
+      }
       let j = i + 1;
       if (c === ">") {
         if (s[j] === ">" || s[j] === "|") j++;
@@ -419,7 +552,10 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
   }
   if (closer === ")") flag(st, "unterminated $(");
   if (depth > 0) flag(st, "unmatched (");
-  return { parts: finish(), end: s.length };
+  const finished = finish();
+  if (loopHeader) flag(st, "unterminated for/select header");
+  if (cases.length > 0) flag(st, "unterminated case statement");
+  return { parts: finished, end: s.length };
 
   function finish(): Part[] {
     endCmd();

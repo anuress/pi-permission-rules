@@ -502,3 +502,57 @@ test("pushd, popd and builtin cd make later relative redirects unknown even when
 test("assignment statements honour deny rules", () => {
   verdict("bash", "deny", { command: "X=1" }, env("acceptEdits", { deny: rules("Bash") }));
 });
+
+test("for and select loops evaluate only their bodies and substitutions", () => {
+  for (const command of [
+    "for f in /tmp/a.jsonl; do wc -l \"$f\"; done",
+    "for f in *.kt; do cat \"$f\"; done",
+  ]) verdict("bash", "allow", { command }, env("acceptEdits"));
+  verdict("bash", "allow", { command: "for f in /tmp/a.jsonl; do wc -l \"$f\"; done" }, env("plan"));
+  verdict("bash", "allow", { command: "select f in a b; do echo $f; done" }, env("acceptEdits"));
+  verdict("bash", "ask", { command: "for f in ${x:=value}; do echo x; done" }, env("acceptEdits"));
+
+  const rm = verdict("bash", "ask", { command: "for f in a b; do rm \"$f\"; done" }, env("acceptEdits"));
+  assert.ok(rm.flags.some((flag) => flag.label === "rm $f"));
+  assert.ok(rm.flags.every((flag) => !flag.label.includes("for") && !flag.suggestion?.includes("for")));
+  verdict("bash", "ask", { command: "for f in $(curl x); do echo $f; done" }, env("acceptEdits"));
+  verdict("bash", "ask", { command: "for f in a; do echo x > /etc/f; done" }, env("acceptEdits"));
+  assert.notEqual(run("bash", { command: "for ((i=0;i<3;i++)); do echo $i; done" }, env("acceptEdits")).verdict, "allow");
+});
+
+test("while read loops and ordinary conditional bodies are evaluated safely", () => {
+  verdict("bash", "allow", { command: "while read l; do echo \"$l\"; done < f" }, env("acceptEdits"));
+  verdict("bash", "deny", { command: "while read l; do echo \"$l\"; done < f" }, env("acceptEdits", { deny: rules("Read(**/f)") }));
+  verdict("bash", "ask", { command: "while read l; do echo \"$l\"; done > /etc/x" }, env("acceptEdits"));
+  verdict("bash", "allow", { command: "if [ -f x ]; then cat x; fi" }, env("acceptEdits"));
+});
+
+test("case arms are syntax; branch commands and subject substitutions are evaluated", () => {
+  verdict("bash", "allow", { command: "case x in a) echo hi;; b|c) echo b;; esac" }, env("acceptEdits"));
+  verdict("bash", "allow", { command: "case x in a) echo;;& b|c) echo;& esac" }, env("acceptEdits"));
+  const rm = verdict("bash", "ask", { command: "case x in a) rm y;; esac" }, env("acceptEdits"));
+  assert.ok(rm.flags.some((flag) => flag.label === "rm y"));
+  verdict("bash", "ask", { command: "case $(curl x) in a) echo;; esac" }, env("acceptEdits"));
+  verdict("bash", "ask", { command: "{ cat a; } > /etc/x" }, env("acceptEdits"));
+});
+
+test("compound closing redirects evaluate paths without empty-command flags", () => {
+  for (const command of [
+    "for x in a; do :; done > /etc/hosts",
+    "if true; then :; fi > /etc/hosts",
+    "case x in a) :;; esac > /etc/hosts",
+    "{ :; } > /etc/hosts",
+    "(:) > /etc/hosts",
+  ]) {
+    const result = verdict("bash", "ask", { command }, env("acceptEdits"));
+    assert.ok(result.flags.some((flag) => flag.label === realpathSync("/etc/hosts")));
+    assert.ok(result.flags.every((flag) => flag.rule !== "unparsed: empty command"));
+  }
+  verdict("bash", "deny", { command: "case x in a) :;; esac < f" }, env("acceptEdits", { deny: rules("Read(**/f)") }));
+});
+
+test("loop and read commands never produce persistent keyword suggestions", () => {
+  const parts = parse("for f in a; do x; done").parts;
+  assert.ok(parts.every((part) => !suggestRule(part)?.includes("for")));
+  assert.equal(suggestRule(parse("read l").parts[0]), null);
+});

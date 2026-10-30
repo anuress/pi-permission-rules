@@ -123,6 +123,31 @@ test("reserved words stripped", () => {
   assert.deepEqual(texts("! grep x f"), ["grep x f"]);
 });
 
+test("for and select headers are control syntax but substitutions remain visible", () => {
+  assert.deepEqual(texts('for f in /tmp/a.jsonl; do wc -l "$f"; done'), ["wc -l $f"]);
+  assert.deepEqual(texts("select f in a b; do echo $f; done"), ["echo $f"]);
+  assert.deepEqual(texts("for f in $(curl x); do echo $f; done"), ["curl x", "echo $f"]);
+  assert.ok(parse("for ((i=0;i<3;i++)); do echo $i; done").unsafe);
+  assert.ok(parse("for f in ${x:=value}; do echo x; done").unsafe);
+  assert.equal(parse("for ((1;2;3)); do echo x; done").unsafe, undefined);
+});
+
+test("case patterns are control syntax and branch commands remain visible", () => {
+  assert.deepEqual(texts("case x in a) echo hi;; (b|c) echo b;& esac"), ["echo hi", "echo b"]);
+  assert.deepEqual(texts("case $(curl x) in a) echo;; esac"), ["curl x", "echo"]);
+  assert.equal(parse("case x in a) echo;; b) echo;; esac").unsafe, undefined);
+  assert.equal(parse("case x in a) echo;;& b|c) echo;& esac").unsafe, undefined);
+});
+
+test("compound closing redirects have an empty argv part", () => {
+  for (const command of ["for x in a; do :; done > out", "if true; then :; fi > out", "case x in a) :;; esac > out", "{ :; } > out", "(:) > out"]) {
+    const redirected = parse(command).parts.find((part) => part.redirects.length > 0);
+    assert.ok(redirected, command);
+    assert.deepEqual(redirected.argv, [], command);
+    assert.equal(redirected.compoundRedirect, true, command);
+  }
+});
+
 test("parse errors are unsafe", () => {
   assert.ok(parse("cat <<").unsafe);
   assert.ok(parse("ls )").unsafe);

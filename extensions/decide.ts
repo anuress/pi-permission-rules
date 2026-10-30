@@ -23,7 +23,7 @@ type Evaluation = { verdict: Verdict; flag?: Flag; item: DecisionItem };
 
 const MODES: readonly Mode[] = ["default", "acceptEdits", "plan"];
 const DANGEROUS_ASSIGNMENT = /^(?:LD_.*|DYLD_.*|GIT_.*|SSH_.*|PATH|PAGER|.*_PAGER|EDITOR|VISUAL|LESSOPEN|LESSCLOSE|BASH_ENV|ENV|NODE_OPTIONS|NODE_PATH|PYTHON.*|PERL5.*|RUBYOPT|RUBYLIB|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|.*_OPTS|PROMPT_COMMAND|IFS|SHELLOPTS|BASHOPTS)$/;
-const READ_ARGUMENT_EXEMPT_COMMANDS = new Set(["echo", "printf", "test", "[", "cd", "pwd", "basename", "dirname", "realpath", "true", "which"]);
+const READ_ARGUMENT_EXEMPT_COMMANDS = new Set(["echo", "printf", "read", "test", "[", "cd", "pwd", "basename", "dirname", "realpath", "true", "false", ":", "which"]);
 
 function physical(path: string): string {
   const absolute = resolve(path);
@@ -131,6 +131,7 @@ function evaluatePart(part: Part, env: Env): Evaluation {
       return evaluated("part", part.text, "ask", "assignment statement");
     }
     if (part.redirects.length > 0 || part.inputs.length > 0) {
+      if (part.compoundRedirect) return evaluated("part", part.text, "allow", "compound command redirect");
       return evaluated("part", part.text, env.mode === "plan" ? "deny" : "ask", env.mode === "plan" ? "plan mode" : "unparsed: empty command");
     }
     return evaluated("part", part.text, "allow", "empty command part");
@@ -297,7 +298,7 @@ export function suggestRule(part: Part): string | null {
   if (!part.argv.length || part.assignments.length > 0) return null;
   const first = part.argv[0];
   const executable = first.slice(first.lastIndexOf("/") + 1);
-  if (CODE_RUNNERS.has(executable) || ["command", "nohup", "time", "nice", "timeout", "builtin", "awk", "gawk", "sed", "find", "npx"].includes(executable)
+  if (CODE_RUNNERS.has(executable) || ["for", "select", "case", "while", "until", "if", "function", "time", "{", "(", "!", "read", "command", "nohup", "nice", "timeout", "builtin", "awk", "gawk", "sed", "find", "npx"].includes(executable)
     || (executable === "gh" && part.argv.includes("api"))
     || (["gh", "git"].includes(executable) && part.argv[1]?.startsWith("-"))) return null;
   const second = part.argv[1];

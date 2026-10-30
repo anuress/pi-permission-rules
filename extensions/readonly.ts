@@ -3,7 +3,7 @@ import type { Part } from "./shell.ts";
 const READ_ONLY_COMMANDS = new Set([
   "ls", "cat", "head", "tail", "wc", "grep", "rg", "fd", "pwd", "echo", "printf",
   "which", "file", "stat", "du", "df", "jq", "sort", "uniq", "cut", "tr", "diff", "cmp",
-  "basename", "dirname", "realpath", "true", "test", "[", "date", "cd",
+  "basename", "dirname", "realpath", "read", "true", "false", ":", "test", "[", "date", "cd",
 ]);
 
 const GLOB_CHECKED_COMMANDS = new Set(["find", "sed", "sort", "rg", "fd", "git", "file", "uniq", "date", "awk"]);

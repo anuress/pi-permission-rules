@@ -15,7 +15,7 @@ const readOnlyCases: [string, boolean][] = [
   ...[
     "ls", "cat", "head", "tail", "wc", "grep", "rg", "fd", "pwd", "echo", "printf", "which", "file",
     "stat", "du", "df", "jq", "sort", "uniq", "cut", "tr", "diff", "cmp", "basename",
-    "dirname", "realpath", "true", "test", "[", "date",
+    "dirname", "realpath", "read", "true", "false", ":", "test", "[", "date",
   ].map((command) => [command, true] as [string, boolean]),
   ["cd sub", true],
   ["which node", true],
@@ -282,6 +282,12 @@ test("unquoted glob operands block checked read-only commands only", () => {
     assert.equal(isReadOnly(part(command), []), false, command);
   }
   for (const command of ["ls *.kt", "cat *.md", "grep x *.kt", "wc -l *.ts", "cat '*.md'"]) {
+    assert.equal(isReadOnly(part(command), []), true, command);
+  }
+});
+
+test("read, true, false and colon builtins are read-only without filtering read options", () => {
+  for (const command of ["read variable", "read -r variable", "read -u fd variable", "true", "false", ":"]) {
     assert.equal(isReadOnly(part(command), []), true, command);
   }
 });
