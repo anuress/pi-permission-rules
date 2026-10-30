@@ -23,6 +23,7 @@ type Evaluation = { verdict: Verdict; flag?: Flag; item: DecisionItem };
 
 const MODES: readonly Mode[] = ["default", "acceptEdits", "plan"];
 const DANGEROUS_ASSIGNMENT = /^(?:LD_.*|DYLD_.*|GIT_.*|SSH_.*|PATH|PAGER|.*_PAGER|EDITOR|VISUAL|LESSOPEN|LESSCLOSE|BASH_ENV|ENV|NODE_OPTIONS|NODE_PATH|PYTHON.*|PERL5.*|RUBYOPT|RUBYLIB|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|.*_OPTS|PROMPT_COMMAND|IFS|SHELLOPTS|BASHOPTS)$/;
+const READ_ARGUMENT_EXEMPT_COMMANDS = new Set(["echo", "printf", "test", "[", "cd", "pwd", "basename", "dirname", "realpath", "true", "which"]);
 
 function physical(path: string): string {
   const absolute = resolve(path);
@@ -225,7 +226,8 @@ function evaluateBash(call: Call, env: Env): Decision {
       }
     }
     const hasReadRules = [...env.config.ask, ...env.config.deny].some((rule) => rule.tool === "Read");
-    if (hasReadRules && (isReadOnly(part, env.config.readOnlyCommands) || ["sed", "awk"].includes(part.argv[0]))) {
+    if (hasReadRules && !READ_ARGUMENT_EXEMPT_COMMANDS.has(part.argv[0])
+      && (isReadOnly(part, env.config.readOnlyCommands) || ["sed", "awk"].includes(part.argv[0]))) {
       let options = true;
       for (const [index, arg] of part.argv.slice(1).entries()) {
         if (options && arg === "--") {
@@ -297,7 +299,8 @@ export function suggestRule(part: Part): string | null {
   const command = first;
   const executable = first.slice(first.lastIndexOf("/") + 1);
   if (CODE_RUNNERS.has(executable) || ["command", "nohup", "time", "nice", "timeout", "builtin", "awk", "gawk", "sed", "find", "npx"].includes(executable)
-    || (first === "gh" && part.argv[1] === "api")) return null;
+    || (executable === "gh" && part.argv.includes("api"))
+    || (["gh", "git"].includes(executable) && part.argv[1]?.startsWith("-"))) return null;
   const second = part.argv[1];
   const third = part.argv[2];
   const safeWord = (word: string | undefined) => !!word && !word.startsWith("-") && !word.startsWith(":") && !/[\\/=\'"]/.test(word)

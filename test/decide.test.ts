@@ -405,6 +405,39 @@ test("R39 gh api suggestions are suppressed without changing gh pr suggestions",
   assert.equal(suggestRule(parse("gh pr merge 1").parts[0]), "Bash(gh pr merge:*)");
 });
 
+test("R40 suggestions handle gh and git global options without broad grants", () => {
+  for (const command of ["gh -R o/r api repos/o/r", "/usr/bin/gh api repos/o/r", "git -C x push"]) {
+    assert.equal(suggestRule(parse(command).parts[0]), null, command);
+  }
+  assert.equal(suggestRule(parse("git push origin x").parts[0]), "Bash(git push:*)");
+  assert.equal(suggestRule(parse("gh pr merge 1").parts[0]), "Bash(gh pr merge:*)");
+});
+
+test("R40 Read rules skip command arguments that do not read file contents", () => {
+  writeFileSync(join(root, "local.properties"), "secret");
+  const state = env("acceptEdits", { deny: rules("Read(**/local.properties)") });
+  const commands = [
+    "echo local.properties",
+    "printf %s local.properties",
+    "test -e local.properties",
+    "[ -f local.properties ]",
+    "cd local.properties",
+    "pwd local.properties",
+    "basename local.properties",
+    "dirname local.properties",
+    "realpath local.properties",
+    "true local.properties",
+    "which local.properties",
+  ];
+  for (const command of commands) {
+    verdict("bash", "allow", { command }, state);
+    verdict("bash", "allow", { command }, { ...state, mode: "plan" });
+  }
+  for (const command of ["cat local.properties", "sed -n p local.properties"]) {
+    verdict("bash", "deny", { command }, state);
+  }
+});
+
 test("I2 glob redirects and cd targets are unknown; safe glob reads stay read-only", () => {
   verdict("bash", "ask", { command: "echo x > *.txt" }, env("acceptEdits"));
   verdict("bash", "ask", { command: "cd sub* && echo x > out" }, env("acceptEdits"));
