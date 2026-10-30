@@ -38,7 +38,7 @@ function createState(ctx: Context, processEnv: NodeJS.ProcessEnv): PermissionSta
 
 function currentEnv(state: PermissionState, cwd: string): Env {
   const { mode } = resolveMode(state.processEnv, state.config, state.sessionMode);
-  return { root: state.project.root, cwd, mode, config: state.config, session: state.session };
+  return { root: state.project.root, cwd, mode, config: state.config, session: state.session, git };
 }
 
 function notifyStartup(state: PermissionState, ctx: Context): void {
@@ -108,6 +108,12 @@ export default function (pi: ExtensionAPI): void {
 
       const outcome = await ask(ctx.ui, call, decision, env.mode, state.config.askTimeoutSec);
       if (!outcome.allow) return { block: true, reason: outcome.reason };
+      if (outcome.sessionGrant) {
+        for (const text of outcome.sessionGrant) {
+          const rule = parseRule(text);
+          if (rule && !state.session.some((existing) => existing.text === rule.text)) state.session.push(rule);
+        }
+      }
       if (outcome.grant) {
         try {
           addGrant(state.projectFile, outcome.grant);

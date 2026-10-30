@@ -1,4 +1,4 @@
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,13 +8,15 @@ import { matchBash, matchPath, type Rule, toolFamily } from "./rules.ts";
 import { parse, type Part } from "./shell.ts";
 
 export type Call = { tool: string; command?: string; path?: string };
-export type Env = { root: string; cwd: string; mode: Mode; config: Config; session: Rule[] };
-export type Flag = { label: string; rule: string; suggestion: string | null };
+export type Env = { root: string; cwd: string; mode: Mode; config: Config; session: Rule[]; git?: (args: string[], cwd: string) => string | null };
+export type Flag = { label: string; rule: string; suggestion: string | null; reason?: "outside-project-root"; sessionGrantDirectory?: string };
 export type DecisionItem = {
   kind: "part" | "redirect" | "path" | "tool";
   label: string;
   verdict: "allow" | "ask" | "deny";
   rule: string;
+  reason?: "outside-project-root";
+  sessionGrantDirectory?: string;
 };
 export type Decision = { verdict: "allow" | "ask" | "deny"; flags: Flag[]; reason: string; items: DecisionItem[] };
 
@@ -59,8 +61,8 @@ function customRule(rules: readonly Rule[], tool: string): Rule | undefined {
   return rules.find((rule) => rule.tool === tool && rule.pattern === undefined);
 }
 
-function flag(label: string, rule: string, suggestion: string | null = null): Flag {
-  return { label, rule, suggestion };
+function flag(label: string, rule: string, suggestion: string | null = null, metadata: Pick<Flag, "reason" | "sessionGrantDirectory"> = {}): Flag {
+  return { label, rule, suggestion, ...metadata };
 }
 
 function decision(verdict: Verdict, flags: Flag[] = [], reasonFlag = flags[0], items: DecisionItem[] = []): Decision {
@@ -70,11 +72,14 @@ function decision(verdict: Verdict, flags: Flag[] = [], reasonFlag = flags[0], i
   return { verdict, flags, reason, items };
 }
 
-function evaluated(kind: DecisionItem["kind"], label: string, verdict: Verdict, rule: string, suggestion: string | null = null): Evaluation {
+function evaluated(
+  kind: DecisionItem["kind"], label: string, verdict: Verdict, rule: string, suggestion: string | null = null,
+  metadata: Pick<Flag, "reason" | "sessionGrantDirectory"> = {},
+): Evaluation {
   return {
     verdict,
-    ...(verdict === "allow" ? {} : { flag: flag(label, rule, suggestion) }),
-    item: { kind, label, verdict, rule: verdict === "allow" ? `allowed: ${rule}` : rule },
+    ...(verdict === "allow" ? {} : { flag: flag(label, rule, suggestion, metadata) }),
+    item: { kind, label, verdict, rule: verdict === "allow" ? `allowed: ${rule}` : rule, ...metadata },
   };
 }
 
@@ -86,6 +91,27 @@ function choose(evaluations: Evaluation[]): Decision {
       : worst, "allow");
   const reasonFlag = evaluations.find((evaluation) => evaluation.verdict === verdict)?.flag ?? flags[0];
   return decision(verdict, flags, reasonFlag, evaluations.map((evaluation) => evaluation.item));
+}
+
+function nearestExistingDirectory(path: string): string {
+  let candidate = path;
+  while (true) {
+    try {
+      if (statSync(candidate).isDirectory()) return physical(candidate);
+    } catch { /* Walk up to the nearest existing directory. */ }
+    const parent = dirname(candidate);
+    if (parent === candidate) return physical(candidate);
+    candidate = parent;
+  }
+}
+
+function outsideGrantDirectory(path: string, env: Env): string | undefined {
+  const cwd = nearestExistingDirectory(dirname(path));
+  let output: string | null = null;
+  try { output = env.git?.(["rev-parse", "--show-toplevel"], cwd) ?? null; } catch { /* Use the target parent when Git is unavailable. */ }
+  const directory = output === null ? physical(dirname(path)) : physical(isAbsolute(output) ? output : resolve(cwd, output));
+  if (directory === "/" || inside(homedir(), directory) || /[*?\n\r]/.test(directory)) return undefined;
+  return directory;
 }
 
 function evaluatePath(path: string, family: "Read" | "Edit", env: Env, outside = false, kind: "path" | "redirect" = "path"): Evaluation {
@@ -109,7 +135,10 @@ function evaluatePath(path: string, family: "Read" | "Edit", env: Env, outside =
   if (env.mode === "acceptEdits" && !outside && inside(absolute, root)) {
     return evaluated(kind, absolute, "allow", "inside project root");
   }
-  return evaluated(kind, absolute, "ask", "no allow rule");
+  const metadata = family === "Edit" && env.mode === "acceptEdits" && !outside && !inside(absolute, root)
+    ? { reason: "outside-project-root" as const, sessionGrantDirectory: outsideGrantDirectory(absolute, env) }
+    : {};
+  return evaluated(kind, absolute, "ask", "no allow rule", null, metadata);
 }
 
 function dangerousAssignment(part: Part): string | undefined {

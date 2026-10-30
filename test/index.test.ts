@@ -104,6 +104,32 @@ test("persistent approval writes only the agent permission file", async () => {
   });
 });
 
+test("R45 outside-project approval grants the target worktree for this session without persistence", async () => {
+  await withEnv({ PI_PERMISSIONS_MODE: "acceptEdits" }, async () => {
+    const { root, agent, handlers, ctx, ui } = setup();
+    const targetRoot = join(root, "..", "target-repo");
+    const targetDir = join(targetRoot, "extensions");
+    mkdirSync(targetDir, { recursive: true });
+    execFileSync("git", ["init", "-q", targetRoot]);
+    mkdirSync(agent, { recursive: true });
+    writeFileSync(join(agent, "permissions.json"), JSON.stringify({ permissions: { deny: [`Edit(${realpathSync(targetRoot)}/blocked.ts)`] } }));
+    await handlers.get("session_start")!({}, ctx);
+
+    const option = `Yes, and allow edits in ${realpathSync(targetRoot)} during this session`;
+    ui.answers.push(option);
+    assert.equal(await handlers.get("tool_call")!({ toolName: "write", input: { path: join(targetDir, "one.ts") } }, ctx), undefined);
+    assert.equal(ui.selectCalls.length, 1);
+    assert.deepEqual(ui.selectCalls[0].options, ["Yes", option, "No, and tell pi what to do differently"]);
+    assert.equal(existsSync(join(agent, "permissions")), false);
+    assert.equal(await handlers.get("tool_call")!({ toolName: "edit", input: { path: join(targetDir, "two.ts") } }, ctx), undefined);
+    assert.equal(ui.selectCalls.length, 1);
+
+    const denied = await handlers.get("tool_call")!({ toolName: "write", input: { path: join(targetRoot, "blocked.ts") } }, ctx);
+    assert.notEqual(denied, undefined);
+    assert.equal(ui.selectCalls.length, 1);
+  });
+});
+
 test("hook catches errors from decision evaluation and fails closed", async () => {
   await withEnv({}, async () => {
     const { handlers, ctx } = setup();

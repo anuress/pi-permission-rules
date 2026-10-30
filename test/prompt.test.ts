@@ -73,6 +73,62 @@ test("default-mode Edit can switch session to acceptEdits", async () => {
   assert.deepEqual(result, { allow: true, switchMode: "acceptEdits" });
 });
 
+test("R45 outside-root edit can grant its target directory for this session only", async () => {
+  const directory = "/work/other-project";
+  const option = `Yes, and allow edits in ${directory} during this session`;
+  const { ui, calls } = fakeUi(option);
+  const d: Decision = {
+    verdict: "ask",
+    flags: [{ label: `${directory}/file.ts`, rule: "no allow rule", suggestion: null, reason: "outside-project-root", sessionGrantDirectory: directory }],
+    reason: "",
+    items: [{ kind: "path", label: `${directory}/file.ts`, verdict: "ask", rule: "no allow rule", reason: "outside-project-root", sessionGrantDirectory: directory }],
+  };
+  const result = await ask(ui, { tool: "write", path: `${directory}/file.ts` }, d, "acceptEdits");
+  assert.deepEqual(calls[0].options, ["Yes", option, noOption]);
+  assert.deepEqual(result, { allow: true, sessionGrant: [`Edit(${directory}/**)`] });
+});
+
+test("R45 can grant an outside redirect target but not a Bash part", async () => {
+  const directory = "/work/other-project";
+  const option = `Yes, and allow edits in ${directory} during this session`;
+  const outside = { label: `${directory}/file`, rule: "no allow rule", suggestion: null, reason: "outside-project-root" as const, sessionGrantDirectory: directory };
+  const { ui, calls } = fakeUi(option);
+  const redirect: Decision = {
+    verdict: "ask", flags: [outside], reason: "",
+    items: [
+      { kind: "part", label: "echo x", verdict: "allow", rule: "allowed: read-only" },
+      { kind: "redirect", label: outside.label, verdict: "ask", rule: outside.rule, reason: outside.reason, sessionGrantDirectory: directory },
+    ],
+  };
+  assert.deepEqual(await ask(ui, { tool: "bash", command: "echo x > /work/other-project/file" }, redirect, "acceptEdits"), {
+    allow: true, sessionGrant: [`Edit(${directory}/**)`],
+  });
+  assert.deepEqual(calls[0].options, ["Yes", option, noOption]);
+});
+
+test("R45 does not offer an outside-root grant for mixed reasons, Bash parts, or other modes", async () => {
+  const outside = { label: "/work/file", rule: "no allow rule", suggestion: null, reason: "outside-project-root" as const, sessionGrantDirectory: "/work" };
+  const mixed = { ...outside, label: "rm x", reason: undefined, sessionGrantDirectory: undefined };
+  for (const [tool, flags, mode] of [
+    ["write", [outside, mixed], "acceptEdits"],
+    ["bash", [outside, { ...outside, label: "rm x", reason: undefined, sessionGrantDirectory: undefined }], "acceptEdits"],
+    ["write", [outside], "default"],
+  ] as const) {
+    const { ui, calls } = fakeUi("Yes");
+    const flagsOnly = flags.some((flag) => flag.reason === "outside-project-root")
+      ? flags.map((flag) => ({ ...flag, reason: flag.reason === "outside-project-root" ? "outside-project-root" as const : undefined }))
+      : flags;
+    const items = flagsOnly.map((flag) => ({
+      kind: tool === "bash" ? (flag.reason ? "redirect" as const : "part" as const) : "path" as const,
+      label: flag.label, verdict: "ask" as const, rule: flag.rule,
+      ...(flag.reason === undefined ? {} : { reason: flag.reason, sessionGrantDirectory: flag.sessionGrantDirectory }),
+    }));
+    await ask(ui, { tool }, { verdict: "ask", flags: flagsOnly, reason: "", items }, mode);
+    assert.equal(calls[0].options.includes("Yes, and allow edits in /work during this session"), false);
+    assert.equal(calls[0].options.at(-1), noOption);
+  }
+});
+
 test("Edit outside-root ask in acceptEdits mode has no session switch", async () => {
   const { ui, calls } = fakeUi("Yes");
   await ask(ui, { tool: "edit" }, decision(null), "acceptEdits");

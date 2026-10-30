@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, symlinkSync, realpathSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { parseRule, type Rule } from "../extensions/rules.ts";
 import type { Config, Mode } from "../extensions/config.ts";
 import { parse } from "../extensions/shell.ts";
@@ -80,7 +80,7 @@ test("decision items explain each evaluated part and resolved redirect", () => {
   const decision = verdict("bash", "ask", { command: "ls > /etc/hosts" }, env("acceptEdits"));
   assert.deepEqual(decision.items, [
     { kind: "part", label: "ls", verdict: "allow", rule: "allowed: read-only" },
-    { kind: "redirect", label: realpathSync("/etc/hosts"), verdict: "ask", rule: "no allow rule" },
+    { kind: "redirect", label: realpathSync("/etc/hosts"), verdict: "ask", rule: "no allow rule", reason: "outside-project-root", sessionGrantDirectory: realpathSync("/etc") },
   ]);
 
   const compound = verdict("bash", "ask", { command: "git status && git push" });
@@ -427,6 +427,52 @@ test("R41 never suggests a one-word persistent rule", () => {
     ["npm run build", "Bash(npm run:*)"],
     ["gh pr merge 1", "Bash(gh pr merge:*)"],
   ] as const) assert.equal(suggestRule(parse(command).parts[0]), expected, command);
+});
+
+test("R45 identifies safe outside-project edits by the target worktree root", () => {
+  const target = join(sibling, "nested");
+  mkdirSync(target, { recursive: true });
+  const calls: { args: string[]; cwd: string }[] = [];
+  const state = {
+    ...env("acceptEdits"),
+    git(args: string[], cwd: string) {
+      calls.push({ args, cwd });
+      return sibling;
+    },
+  };
+  const result = verdict("write", "ask", { path: join(target, "new.ts") }, state);
+  assert.deepEqual(calls, [{ args: ["rev-parse", "--show-toplevel"], cwd: realpathSync(target) }]);
+  assert.equal(result.flags[0].reason, "outside-project-root");
+  assert.equal(result.flags[0].sessionGrantDirectory, realpathSync(sibling));
+
+  const fallback = verdict("write", "ask", { path: join(target, "new.ts") }, {
+    ...state,
+    git: () => null,
+  });
+  assert.equal(fallback.flags[0].sessionGrantDirectory, realpathSync(target));
+});
+
+test("R45 outside-project session grant remains below deny, ask, and git protections", () => {
+  const target = join(sibling, "nested", "file.ts");
+  const grant = rules(`Edit(${realpathSync(sibling)}/**)`);
+  const state = { ...env("acceptEdits"), session: grant };
+  verdict("write", "allow", { path: target }, state);
+  verdict("write", "deny", { path: target }, { ...state, config: config({ deny: rules(`Edit(${realpathSync(sibling)}/**)`) }) });
+  verdict("write", "ask", { path: target }, { ...state, config: config({ ask: rules(`Edit(${realpathSync(sibling)}/**)`) }) });
+  verdict("write", "ask", { path: ".git/config" }, { ...env("acceptEdits"), session: rules("Edit(**)") });
+
+  const rootGrant = verdict("write", "ask", { path: "/" }, {
+    ...env("acceptEdits"),
+    git: () => "/",
+  });
+  assert.equal(rootGrant.flags[0].sessionGrantDirectory, undefined);
+  for (const directory of [homedir(), dirname(homedir())]) {
+    const unsafe = verdict("write", "ask", { path: join(sibling, "nested", "file.ts") }, {
+      ...env("acceptEdits"),
+      git: () => directory,
+    });
+    assert.equal(unsafe.flags[0].sessionGrantDirectory, undefined, directory);
+  }
 });
 
 test("R40 Read rules skip command arguments that do not read file contents", () => {
