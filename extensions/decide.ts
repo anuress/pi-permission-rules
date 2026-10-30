@@ -4,7 +4,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Config, Mode } from "./config.ts";
 import { isReadOnly, CODE_RUNNERS } from "./readonly.ts";
-import { matchBash, matchPath, type Rule, toolFamily } from "./rules.ts";
+import { matchBash, matchPath, parseRule, type Rule, toolFamily } from "./rules.ts";
 import { parse, type Part } from "./shell.ts";
 
 export type Call = { tool: string; command?: string; path?: string };
@@ -106,11 +106,12 @@ function nearestExistingDirectory(path: string): string {
 }
 
 function outsideGrantDirectory(path: string, env: Env): string | undefined {
-  const cwd = nearestExistingDirectory(dirname(path));
+  const cwd = nearestExistingDirectory(path);
   let output: string | null = null;
   try { output = env.git?.(["rev-parse", "--show-toplevel"], cwd) ?? null; } catch { /* Use the target parent when Git is unavailable. */ }
   const directory = output === null ? physical(dirname(path)) : physical(isAbsolute(output) ? output : resolve(cwd, output));
-  if (directory === "/" || inside(homedir(), directory) || /[*?\n\r]/.test(directory)) return undefined;
+  if (directory === "/" || inside(physical(homedir()), directory) || /[*?\n\r]/.test(directory)
+    || !parseRule(`Edit(${directory}/**)`)) return undefined;
   return directory;
 }
 
@@ -327,8 +328,20 @@ export function decide(call: Call, env: Env): Decision {
   return choose([evaluated("tool", call.tool, "allow", "custom tool")]);
 }
 
+export function suggestExactRule(part: Part): string | null {
+  if (!part.argv.length || part.assignments.length > 0 || !part.text || part.text.includes("*")
+    || part.text.includes("$") || part.text.includes("`") || part.globs?.some(Boolean) || part.dynamic?.some(Boolean)) return null;
+  const executable = part.argv[0].slice(part.argv[0].lastIndexOf("/") + 1);
+  if (CODE_RUNNERS.has(executable)
+    || ["command", "nohup", "time", "nice", "timeout", "builtin", "npx", "awk", "gawk", "sed", "find", "exec", "source", "."].includes(executable)
+    || (executable === "gh" && part.argv.includes("api"))
+    || (executable === "git" && part.argv.slice(1).includes("config"))) return null;
+  const text = `Bash(${part.text})`;
+  return parseRule(text)?.tool === "Bash" ? text : null;
+}
+
 export function suggestRule(part: Part): string | null {
-  if (!part.argv.length || part.assignments.length > 0) return null;
+  if (!part.argv.length || part.assignments.length > 0 || part.text.includes("*")) return null;
   const first = part.argv[0];
   const executable = first.slice(first.lastIndexOf("/") + 1);
   if (CODE_RUNNERS.has(executable) || ["for", "select", "case", "while", "until", "if", "function", "time", "{", "(", "!", "read", "command", "nohup", "nice", "timeout", "builtin", "awk", "gawk", "sed", "find", "npx"].includes(executable)

@@ -254,7 +254,7 @@ test("suggestRule follows command-name heuristic and suppresses code runners", (
     ["git remote add origin url", "Bash(git remote add:*)"],
   ] as const) assert.equal(suggestRule(parse(command).parts[0]), expected, command);
   assert.equal(suggestRule(parse("FOO=1 ls").parts[0]), null);
-  for (const command of ['rm "$f"', 'git push "$REMOTE" x', "rm *.txt", "rm `echo file`", "rm $(echo file)", "rm $((1+2))"]) {
+  for (const command of ['rm "$f"', 'git push "$REMOTE" x', "rm *.txt", "rm `echo file`", "rm $(echo file)", "rm $((1+2))", "ls *.kt", "echo a*b", "echo 'a*b'", "akasha $VERSION", "akasha `echo x`", "python3 -V", "gh api repos/o/r"]) {
     assert.equal(suggestRule(parse(command).parts[0]), null, command);
   }
   assert.equal(suggestRule(parse("").parts[0] ?? { argv: [], assignments: [], redirects: [], inputs: [], globs: [], dynamic: [], redirectGlobs: [], inputGlobs: [], text: "", scope: "" }), null);
@@ -417,7 +417,7 @@ test("R40 suggestions handle gh and git global options without broad grants", ()
   assert.equal(suggestRule(parse("gh pr merge 1").parts[0]), "Bash(gh pr merge:*)");
 });
 
-test("R41 never suggests a one-word persistent rule", () => {
+test("R41 never suggests a one-word prefix rule", () => {
   for (const command of ["git", "gh", "make", "docker --context x run img", "kubectl --kubeconfig x delete pod", "git config core.pager x"]) {
     assert.equal(suggestRule(parse(command).parts[0]), null, command);
   }
@@ -457,6 +457,7 @@ test("R45 outside-project session grant remains below deny, ask, and git protect
   const grant = rules(`Edit(${realpathSync(sibling)}/**)`);
   const state = { ...env("acceptEdits"), session: grant };
   verdict("write", "allow", { path: target }, state);
+  verdict("write", "deny", { path: target }, env("plan"));
   verdict("write", "deny", { path: target }, { ...state, config: config({ deny: rules(`Edit(${realpathSync(sibling)}/**)`) }) });
   verdict("write", "ask", { path: target }, { ...state, config: config({ ask: rules(`Edit(${realpathSync(sibling)}/**)`) }) });
   verdict("write", "ask", { path: ".git/config" }, { ...env("acceptEdits"), session: rules("Edit(**)") });

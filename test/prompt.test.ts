@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { ask, type Ui } from "../extensions/prompt.ts";
 import type { Call, Decision } from "../extensions/decide.ts";
 import type { Mode } from "../extensions/config.ts";
+import { matchBash, parseRule } from "../extensions/rules.ts";
+import { parse } from "../extensions/shell.ts";
 
 type UiCalls = { title: string; options: string[]; opts?: { timeout?: number } }[];
 
@@ -56,6 +58,63 @@ test("Bash prompt joins distinct suggested rules in flag order", async () => {
   const result = await ask(ui, { tool: "bash" }, decision("Bash(git push:*)", "Bash(npm run:*)"), "default");
   assert.deepEqual(calls[0].options, ["Yes", label, noOption]);
   assert.deepEqual(result, { allow: true, grant: ["Bash(git push:*)", "Bash(npm run:*)"] });
+});
+
+test("R43 offers exact persistent rules only for identical commands", async () => {
+  for (const command of ["akasha --help", "make", "git"]) {
+    const exact = `Bash(${command})`;
+    const option = `Yes, and don't ask again for ${exact} in this project`;
+    const { ui, calls } = fakeUi(option);
+    const result = await ask(ui, { tool: "bash", command }, {
+      verdict: "ask", flags: [{ label: command, rule: "no allow rule", suggestion: null }], reason: "",
+      items: [{ kind: "part", label: command, verdict: "ask", rule: "no allow rule" }],
+    }, "default");
+    assert.deepEqual(calls[0].options, ["Yes", option, noOption]);
+    assert.deepEqual(result, { allow: true, grant: [exact] });
+  }
+
+  const rule = parseRule("Bash(akasha --help)")!;
+  assert.equal(matchBash(rule, parse("akasha --help").parts[0]), true);
+  assert.equal(matchBash(rule, parse("akasha --help x").parts[0]), false);
+  assert.equal(matchBash(rule, parse("akasha").parts[0]), false);
+});
+
+test("R43 suppresses exact rules for wrappers, dynamic text, globs, and unsafe parses", async () => {
+  for (const command of [
+    "bash --help", "sh --help", "zsh --help", "python -V", "python3 -V", "node --version", "ruby -v", "perl -v",
+    "sudo true", "xargs grep x", "env true", "command true", "nohup true", "time true", "nice true", "timeout 2 true",
+    "builtin echo x", "npx command", "eval true", "./bash --help", "awk '{print}'", "gawk '{print}'", "sed -n p", "find .", "exec echo x", "source file", ". file",
+    'rm "$f"', "ls *.kt", "echo a*b", "echo 'a*b'", "akasha $VERSION", "akasha `echo x`", "FOO=1 make",
+    "gh api repos/o/r", "git config core.pager x", "echo 'unterminated", "",
+  ]) {
+    const part = parse(command).parts[0];
+    const label = part?.text ?? command;
+    const { ui, calls } = fakeUi("Yes");
+    await ask(ui, { tool: "bash", command }, {
+      verdict: "ask", flags: [{ label, rule: "no allow rule", suggestion: null }], reason: "",
+      items: [{ kind: "part", label, verdict: "ask", rule: "no allow rule" }],
+    }, "default");
+    assert.equal(calls[0].options.some((option) => option.startsWith("Yes, and don't ask again")), false, command);
+  }
+});
+
+test("R43 never attaches an exact Bash rule to a redirect flag", async () => {
+  const command = "/tmp/path";
+  const { ui, calls } = fakeUi("Yes");
+  await ask(ui, { tool: "bash", command }, {
+    verdict: "ask", flags: [{ label: command, rule: "no allow rule", suggestion: null }], reason: "",
+    items: [{ kind: "redirect", label: command, verdict: "ask", rule: "no allow rule" }],
+  }, "default");
+  assert.deepEqual(calls[0].options, ["Yes", noOption]);
+});
+
+test("R43 does not offer an exact rule for an empty label", async () => {
+  const { ui, calls } = fakeUi("Yes");
+  await ask(ui, { tool: "bash", command: "akasha --help" }, {
+    verdict: "ask", flags: [{ label: "", rule: "no allow rule", suggestion: null }], reason: "",
+    items: [{ kind: "part", label: "", verdict: "ask", rule: "no allow rule" }],
+  }, "default");
+  assert.deepEqual(calls[0].options, ["Yes", noOption]);
 });
 
 test("any missing suggestion removes persistent option", async () => {

@@ -1,4 +1,5 @@
-import type { Call, Decision } from "./decide.ts";
+import { suggestExactRule, type Call, type Decision } from "./decide.ts";
+import { parse } from "./shell.ts";
 import type { Mode } from "./config.ts";
 import { toolFamily } from "./rules.ts";
 
@@ -19,8 +20,23 @@ const PLAIN_DENY = "permission: denied by user. It was not run.";
 export async function ask(ui: Ui, call: Call, d: Decision, mode: Mode, timeoutSec?: number): Promise<Outcome> {
   const title = [`Permission needed: ${call.tool}`, ...d.flags.map(({ label, rule }) => `- ${label} (${rule})`)].join("\n");
   const family = toolFamily(call.tool);
-  const suggestions = [...new Set(d.flags.map((flag) => flag.suggestion).filter((suggestion): suggestion is string => suggestion !== null))];
-  const persistent = family === "Bash" && d.flags.length > 0 && d.flags.every((flag) => flag.suggestion !== null)
+  const bashParts = call.command === undefined ? undefined : parse(call.command);
+  const exactSuggestions = new Map<string, string | null>();
+  if (family === "Bash" && bashParts?.unsafe === undefined && bashParts !== undefined) {
+    for (const part of bashParts.parts) {
+      const suggestion = suggestExactRule(part);
+      exactSuggestions.set(part.text, exactSuggestions.has(part.text) && exactSuggestions.get(part.text) !== suggestion
+        ? null : suggestion);
+    }
+  }
+  const suggestionFor = (flag: Decision["flags"][number]) => {
+    if (flag.suggestion !== null) return flag.suggestion;
+    const matchingItems = d.items.filter((item) => item.verdict !== "allow" && item.label === flag.label);
+    if (matchingItems.length === 0 || matchingItems.some((item) => item.kind !== "part")) return null;
+    return exactSuggestions.get(flag.label) ?? null;
+  };
+  const suggestions = [...new Set(d.flags.map(suggestionFor).filter((suggestion): suggestion is string => suggestion !== null))];
+  const persistent = family === "Bash" && d.flags.length > 0 && d.flags.every((flag) => suggestionFor(flag) !== null)
     ? `Yes, and don't ask again for ${suggestions.join(", ")} in this project`
     : undefined;
   const outsideItems = d.items.filter((item) => item.verdict !== "allow");

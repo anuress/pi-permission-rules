@@ -91,7 +91,7 @@ The lexer fails closed: parse errors, unbalanced quotes, unterminated heredocs o
 
 ## Read-only commands
 
-The built-in list includes `ls`, `cat`, `head`, `tail`, `wc`, `grep`, `rg`, `fd`, `pwd`, `echo`, `printf`, `which`, `file`, `stat`, `du`, `df`, `jq`, `sort`, `uniq`, `cut`, `tr`, `diff`, `cmp`, `basename`, `dirname`, `realpath`, `true`, `test`, `[`, `date`, and `cd`, plus checked forms of `find`, `sed`, `awk`, `git`, and `gh`. Known file-writing and code-execution forms are excluded from the built-in read-only forms; command-specific option checks are conservative, not a complete sandbox for every utility version. For commands with checked option allowlists, GNU long options must match the full safe option name; an abbreviation is not accepted merely because it shares a prefix with a safe option.
+The built-in list includes `ls`, `cat`, `head`, `tail`, `wc`, `grep`, `rg`, `fd`, `pwd`, `echo`, `printf`, `which`, `file`, `stat`, `du`, `df`, `jq`, `sort`, `uniq`, `cut`, `tr`, `diff`, `cmp`, `basename`, `dirname`, `realpath`, `true`, `test`, `[`, `date`, and `cd`, plus checked forms of `find`, `sed`, `awk`, `git`, `gh`, and constrained `xargs`. `xargs` is read-only only with `-0`/`--null`, `-r`/`--no-run-if-empty`, `-n N`, `-L N`, `-P N`, and `-d X` options (values may be attached or separate), and a bare wrapped command among `grep`, `egrep`, `fgrep`, `cat`, `wc`, `head`, `tail`, `ls`, `stat`, and `du`. Replacement, input-file, interactive, output, prompt, and end-of-file options are not accepted. The built-in xargs allowance is disabled when any Read ask/deny rule is active because stdin can supply file operands the gate cannot inspect. `readOnlyCommands` does not bypass these xargs checks. Known file-writing and code-execution forms are excluded from the built-in read-only forms; command-specific option checks are conservative, not a complete sandbox for every utility version. For commands with checked option allowlists, GNU long options must match the full safe option name; an abbreviation is not accepted merely because it shares a prefix with a safe option.
 
 The checked forms include:
 
@@ -110,11 +110,12 @@ Global and per-project `readOnlyCommands` settings can add command names without
 When a human is available, the prompt shows the tool, the command parts or paths that triggered the ask, and the matching rule (or `no allow rule`). Available options are:
 
 1. `Yes` — allow this call once.
-2. `Yes, and don't ask again for <rules> in this project` — for eligible Bash parts, save suggested rules to the per-project file and apply them to the session.
-3. `Yes, allow all edits during this session` — for edits in `default` mode, switch this session to `acceptEdits`.
-4. `No, and tell pi what to do differently` — deny; optional text is included in the block reason.
+2. `Yes, and don't ask again for <rules> in this project` — for eligible Bash parts, save suggested or exact-command rules to the per-project file and apply them to the session. Exact `Bash(<part>)` rules match only that same parsed part; they are offered only for fully parsed static commands, not code runners or wrappers (`bash`, `python`, `npx`, `xargs`, `command`, `env`, and similar), assignments, dynamic text (variables, backticks, or substitutions), unquoted globs, `gh ... api`, `git config`, or text containing `*`.
+3. `Yes, and allow edits in <dir> during this session` — for an outside-project edit or output redirect in `acceptEdits`, add an in-memory `Edit(<dir>/**)` rule. The directory is the target worktree root (or target parent when outside Git); it is never saved and is not offered for `/`, the home directory, its ancestors, or when matching policy asks or denies.
+4. `Yes, allow all edits during this session` — for edits in `default` mode, switch this session to `acceptEdits`.
+5. `No, and tell pi what to do differently` — deny; optional text is included in the block reason.
 
-Only applicable choices are shown. Persistent rules are offered for Bash parts with suggestions; unsafe or unparsed commands have no persistent option. There is no timeout by default. Set `askTimeoutSec` to a positive number of seconds to make an unanswered prompt count as a denial.
+Only applicable choices are shown. Unattended asks remain blocked without opening a prompt. There is no timeout by default. Set `askTimeoutSec` to a positive number of seconds to make an unanswered prompt count as a denial.
 
 ## Unattended mode
 

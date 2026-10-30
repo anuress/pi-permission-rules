@@ -104,6 +104,23 @@ test("persistent approval writes only the agent permission file", async () => {
   });
 });
 
+test("R43 persists only an exact command and does not widen it to argument variants", async () => {
+  await withEnv({}, async () => {
+    const { root, agent, handlers, ctx, ui } = setup();
+    await handlers.get("session_start")!({}, ctx);
+    const exact = "Bash(akasha --help)";
+    ui.answers.push(`Yes, and don't ask again for ${exact} in this project`);
+    assert.equal(await handlers.get("tool_call")!({ toolName: "bash", input: { command: "akasha --help" } }, ctx), undefined);
+    const file = join(agent, "permissions", keyFilename(realpathSync(root)));
+    assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).permissions.allow, [exact]);
+    assert.equal(await handlers.get("tool_call")!({ toolName: "bash", input: { command: "akasha --help" } }, ctx), undefined);
+    assert.equal(ui.selectCalls.length, 1);
+    ui.answers.push("Yes");
+    assert.equal(await handlers.get("tool_call")!({ toolName: "bash", input: { command: "akasha --help x" } }, ctx), undefined);
+    assert.equal(ui.selectCalls.length, 2);
+  });
+});
+
 test("R45 outside-project approval grants the target worktree for this session without persistence", async () => {
   await withEnv({ PI_PERMISSIONS_MODE: "acceptEdits" }, async () => {
     const { root, agent, handlers, ctx, ui } = setup();
@@ -127,6 +144,16 @@ test("R45 outside-project approval grants the target worktree for this session w
     const denied = await handlers.get("tool_call")!({ toolName: "write", input: { path: join(targetRoot, "blocked.ts") } }, ctx);
     assert.notEqual(denied, undefined);
     assert.equal(ui.selectCalls.length, 1);
+  });
+});
+
+test("R45 unattended outside-project edits remain blocked without offering a grant", async () => {
+  await withEnv({ PI_PERMISSIONS_MODE: "acceptEdits", NAKAMA_AGENT: "worker" }, async () => {
+    const { root, handlers, ctx, ui } = setup();
+    await handlers.get("session_start")!({}, ctx);
+    const result = await handlers.get("tool_call")!({ toolName: "write", input: { path: join(root, "..", "outside.ts") } }, ctx) as { block?: boolean };
+    assert.equal(result.block, true);
+    assert.equal(ui.selectCalls.length, 0);
   });
 });
 
