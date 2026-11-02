@@ -258,10 +258,9 @@ function redirectPath(target: string, dir: string | null, glob = false): { path:
 }
 
 function cdDirectory(part: Part, dir: string | null): string | null {
-  const argv = unwrapWrappers(part.argv);
-  if (argv[0] !== "cd") return dir;
-  const offset = part.argv.length - argv.length;
-  const args = argv.slice(1);
+  // Only a bare `cd` surely runs in this shell; a wrapped one leaves the directory unknown.
+  if (part.argv[0] !== "cd") return null;
+  const args = part.argv.slice(1);
   let index = 0;
   while (args[index]?.startsWith("-") && args[index] !== "-") {
     if (args[index] === "--") {
@@ -272,7 +271,7 @@ function cdDirectory(part: Part, dir: string | null): string | null {
     index++;
   }
   const targets = args.slice(index);
-  if (targets.length !== 1 || targets[0] === "-" || targets[0].includes("$") || part.globs[offset + index + 1]) return null;
+  if (targets.length !== 1 || targets[0] === "-" || targets[0].includes("$") || part.globs[index + 1]) return null;
   const target = homePath(targets[0]);
   if (target === null || (dir === null && !isAbsolute(target))) return null;
   return physical(resolve(dir ?? "/", target));
@@ -348,8 +347,8 @@ function evaluateBash(call: Call, env: Env): Decision {
     }
     const argv = part.argv;
     if (changesDir(argv)) {
-      // A second cd, or one in a body that may not run, leaves the directory unknown.
-      if (unwrapWrappers(argv)[0] === "cd" && !seenCd.get(part.scope) && !part.conditional) dirs.set(part.scope, cdDirectory(part, dir));
+      // A second cd, one in a body that may not run, or a wrapped cd leaves the directory unknown.
+      if (argv[0] === "cd" && !seenCd.get(part.scope) && !part.conditional) dirs.set(part.scope, cdDirectory(part, dir));
       else dirs.set(part.scope, null);
       seenCd.set(part.scope, true);
     }

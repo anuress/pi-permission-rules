@@ -761,7 +761,34 @@ test("fix round 4: deep substitutions, time before a group and time cd", () => {
   for (const command of ["time ! { cd ../..; }; echo x > out", "time -p ! { cd ../..; }; echo x > out"]) {
     assert.notEqual(run("bash", { command }, env("acceptEdits", { allow: rules("Bash(time:*)") }, join(root, "app"))).verdict, "allow", command);
   }
-  verdict("bash", "allow", { command: "time cd app; echo x > out" },
-    env("acceptEdits", { allow: rules("Bash(time cd:*)") }));
+  // A wrapper does not guarantee cd ran in this shell, so its target stays unknown.
+  assert.notEqual(run("bash", { command: "time cd app; echo x > out" },
+    env("acceptEdits", { allow: rules("Bash(time cd:*)") })).verdict, "allow");
+  verdict("bash", "allow", { command: "cd app; echo x > out" }, env("acceptEdits"));
+});
+
+test("fix round 5: wrapped cd targets are unknown and a skipped cd does not move the directory", () => {
+  const wrapped = [
+    [`command -v cd ${root}/app || true; echo x > out`, "Bash(command -v cd:*)"],
+    [`"time" cd ${root}/app || true; echo x > out`, "Bash(time cd:*)"],
+    [`echo x | time cd ${root}/app || true; echo x > out`, "Bash(time cd:*)"],
+  ];
+  for (const [command, rule] of wrapped) {
+    assert.notEqual(run("bash", { command }, env("acceptEdits", { allow: rules(rule) }, sibling)).verdict, "allow", command);
+  }
+  // A cd that may be skipped, or runs in a pipeline or background job, must not move the directory.
+  for (const command of [
+    `false && cd ${root}/app; echo x > out`,
+    `true || cd ${root}/app; echo x > out`,
+    `false && { echo; cd ${root}/app; }; echo x > out`,
+    `cd ${root}/app | true; echo x > out`,
+    `echo x | cd ${root}/app || true; echo x > out`,
+    `cd ${root}/app & echo x > out`,
+  ]) assert.notEqual(run("bash", { command }, env("acceptEdits", {}, sibling)).verdict, "allow", command);
+  for (const command of [`false && time cd ${root}/app; echo x > out`, `time cd ${root}/app | true; echo x > out`]) {
+    assert.notEqual(run("bash", { command }, env("acceptEdits", { allow: rules("Bash(time cd:*)") }, sibling)).verdict, "allow", command);
+  }
+  verdict("bash", "allow", { command: "cd app && echo x > out" }, env("acceptEdits"));
+  assert.notEqual(run("bash", { command: "cd .. && echo x > out" }, env("acceptEdits")).verdict, "allow");
   verdict("bash", "allow", { command: "cd app; echo x > out" }, env("acceptEdits"));
 });

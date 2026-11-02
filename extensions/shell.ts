@@ -75,6 +75,8 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
   let compoundEndPending = false;
   let compoundRedirect = false;
   let timePending = false;
+  // A part after a list or pipeline operator may not run in this shell; sticky until the scan ends.
+  let conditionalOp = false;
   const cases: { phase: "subject" | "patterns" | "body"; patternStarted: boolean }[] = [];
   // A cd inside these constructs is unknown: the body may not run, or run many times.
   type Control = { kind: "if" | "loop" | "brace" | "group" | "case"; loop?: number };
@@ -213,7 +215,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
     stdinFed = false;
     if (argv.length > 0 || redirects.length > 0 || inputs.length > 0 || assignments.length > 0) {
       // `conditional`: may not run. `loops`: the loop bodies it re-runs in, inherited by nested scans.
-      const conditional = controls.some((control) => control.kind !== "group");
+      const conditional = conditionalOp || controls.some((control) => control.kind !== "group");
       const loops = currentLoops();
       out.push({ argv, assignments, redirects, inputs, globs, dynamic, redirectGlobs, inputGlobs, text: argv.length ? argv.join(" ") : assignments.join(" "), scope: scopes[scopes.length - 1].id, ...(compoundRedirect ? { compoundRedirect: true } : {}), ...(conditional ? { conditional: true } : {}), ...(loops.length > 0 ? { loops } : {}) });
     }
@@ -558,7 +560,10 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
         caseState.phase = "patterns";
         caseState.patternStarted = false;
       } else {
+        // `||` and `;` run their left side here, but a pipe member runs in a subshell.
+        if (c === "|" && n !== "|") conditionalOp = true;
         endCmd();
+        if (c === "|") conditionalOp = true;
         i++;
       }
     } else if (c === "&") {
@@ -571,7 +576,10 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
         i += s[i + 2] === ">" ? 3 : 2;
         mode = "redir";
       } else {
+        // A single `&` backgrounds its left side; `&&` runs it here.
+        if (n !== "&") conditionalOp = true;
         endCmd();
+        conditionalOp = true;
         i += n === "&" ? 2 : 1;
       }
     } else if (c === ">" || c === "<") {
