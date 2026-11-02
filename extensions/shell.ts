@@ -1,7 +1,7 @@
 // Shell lexer: splits a bash command into parts so rules match per sub-command,
 // never against raw text. Fails closed (`unsafe`) on anything it cannot vouch for.
 
-export type Part = { argv: string[]; assignments: string[]; redirects: string[]; inputs: string[]; globs: boolean[]; dynamic: boolean[]; redirectGlobs: boolean[]; inputGlobs: boolean[]; text: string; scope: string; compoundRedirect?: boolean };
+export type Part = { argv: string[]; assignments: string[]; redirects: string[]; inputs: string[]; globs: boolean[]; dynamic: boolean[]; redirectGlobs: boolean[]; inputGlobs: boolean[]; text: string; scope: string; compoundRedirect?: boolean; conditional?: boolean };
 export type ParseResult = { parts: Part[]; unsafe?: string };
 
 type State = { unsafe?: string };
@@ -10,6 +10,8 @@ type Mode = null | "redir" | "input" | "skip" | "heredoc";
 
 const PLACEHOLDER = "$(…)";
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+// Names that change how later commands resolve: shared with the decision logic.
+export const DANGEROUS_ASSIGNMENT = /^(?:LD_.*|DYLD_.*|GIT_.*|SSH_.*|PATH|PAGER|.*_PAGER|EDITOR|VISUAL|LESSOPEN|LESSCLOSE|BASH_ENV|ENV|NODE_OPTIONS|NODE_PATH|PYTHON.*|PERL5.*|RUBYOPT|RUBYLIB|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|.*_OPTS|PROMPT_COMMAND|IFS|SHELLOPTS|BASHOPTS)$/;
 // Reserved words dropped at command position so the real command is matched.
 const RESERVED = new Set(["if", "then", "else", "elif", "do", "while", "until", "!", "{", "}", "fi", "done", "esac"]);
 const SHELLS = new Set(["bash", "sh", "zsh"]);
@@ -71,9 +73,16 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
   let compoundEndPending = false;
   let compoundRedirect = false;
   const cases: { phase: "subject" | "patterns" | "body"; patternStarted: boolean }[] = [];
+  // A cd inside these constructs is unknown: the body may not run, or run many times.
+  const controls: ("if" | "loop" | "brace" | "case")[] = [];
   const scopes: { id: string; children: number }[] = [{ id: scope, children: 0 }];
   const heredocs: Heredoc[] = [];
   let i = start;
+
+  const openControl = (kind: "if" | "loop" | "brace" | "case") => controls.push(kind);
+  const closeControl = (kind: "if" | "loop" | "brace" | "case") => {
+    if (controls[controls.length - 1] === kind) controls.pop();
+  };
 
   const endWord = () => {
     if (!inWord) return;
@@ -97,6 +106,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
       let handled = false;
       if (loopHeader && atStart) {
         if (loopHeader.phase === "name" && !quoted && /^[A-Za-z_][A-Za-z0-9_]*$/.test(w)) {
+          if (DANGEROUS_ASSIGNMENT.test(w)) flag(st, `dangerous loop variable ${w}`);
           loopHeader.phase = "after-name";
           handled = true;
         } else if (loopHeader.phase === "after-name" && !quoted && w === "in") {
@@ -104,11 +114,13 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
           handled = true;
         } else if (loopHeader.phase === "after-name" && !quoted && w === "do") {
           loopHeader = undefined;
+          openControl("loop");
           handled = true;
         } else if (loopHeader.phase === "words") {
           handled = true;
         } else if (loopHeader.phase === "body" && !quoted && (w === "do" || w === "{")) {
           loopHeader = undefined;
+          openControl(w === "{" ? "brace" : "loop");
           handled = true;
         } else {
           flag(st, "malformed for/select header");
@@ -123,20 +135,26 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
       if (!handled) {
         if (controlStart && !quoted && w === "case") {
           cases.push({ phase: "subject", patternStarted: false });
+          openControl("case");
           compoundEndPending = false;
         } else if (controlStart && !quoted && w === "esac") {
           if (caseState && caseState.phase !== "subject") cases.pop();
           else flag(st, "esac without case body");
+          closeControl("case");
           compoundEndPending = true;
         } else if (caseState?.phase === "subject") {
           if (!quoted && w === "in") caseState.phase = "patterns";
         } else if (caseState?.phase === "patterns") {
           caseState.patternStarted = true;
         } else if (controlStart && !quoted && w === "}") {
+          closeControl("brace");
           compoundEndPending = true;
         } else if (controlStart && !quoted && (w === "fi" || w === "done")) {
+          closeControl(w === "fi" ? "if" : "loop");
           compoundEndPending = true;
         } else if (controlStart && !quoted && RESERVED.has(w)) {
+          if (w === "if") openControl("if");
+          else if (w === "while" || w === "until") openControl("loop");
           compoundEndPending = false;
         } else if (atStart && ASSIGNMENT.test(raw)) {
           compoundEndPending = false;
@@ -169,7 +187,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
     if (argv.length > 0) checkRunner(argv, stdinFed, st);
     stdinFed = false;
     if (argv.length > 0 || redirects.length > 0 || inputs.length > 0 || assignments.length > 0) {
-      out.push({ argv, assignments, redirects, inputs, globs, dynamic, redirectGlobs, inputGlobs, text: argv.length ? argv.join(" ") : assignments.join(" "), scope: scopes[scopes.length - 1].id, ...(compoundRedirect ? { compoundRedirect: true } : {}) });
+      out.push({ argv, assignments, redirects, inputs, globs, dynamic, redirectGlobs, inputGlobs, text: argv.length ? argv.join(" ") : assignments.join(" "), scope: scopes[scopes.length - 1].id, ...(compoundRedirect ? { compoundRedirect: true } : {}), ...(controls.length > 0 ? { conditional: true } : {}) });
     }
     out.push(...inner);
     argv = [];

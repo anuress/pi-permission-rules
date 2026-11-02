@@ -664,3 +664,34 @@ test("loop and read commands never produce persistent keyword suggestions", () =
   assert.ok(parts.every((part) => !suggestRule(part)?.includes("for")));
   assert.equal(suggestRule(parse("read l").parts[0]), null);
 });
+
+test("dangerous loop variables are checked like environment assignments", () => {
+  for (const command of ["for PATH in /tmp/evil; do ls; done", "for LD_PRELOAD in /tmp/evil.so; do ls; done", "select BASH_ENV in /tmp/x; do ls; done"]) {
+    verdict("bash", "ask", { command }, env("acceptEdits"));
+    verdict("bash", "deny", { command }, env("plan"));
+  }
+  verdict("bash", "allow", { command: "for f in a; do cat \"$f\"; done" }, env("acceptEdits"));
+});
+
+test("read assignment targets are checked like environment assignments", () => {
+  for (const command of ["read PATH <<< /tmp/evil; ls", "echo /tmp/evil | { read PATH; ls; }", "read -r LD_PRELOAD < f; ls", "read -a PATH", "read -p prompt IFS"]) {
+    assert.notEqual(run("bash", { command }, env("acceptEdits")).verdict, "allow", command);
+  }
+  verdict("bash", "allow", { command: "read -r line" }, env("acceptEdits"));
+  verdict("bash", "allow", { command: "read -p PATH line" }, env("acceptEdits"));
+});
+
+test("a cd in a loop body or a branch that may not run leaves the directory unknown", () => {
+  for (const command of ["for f in a b c; do cd ..; done; echo x > out", "while false; do cd ..; done; echo x > out"]) {
+    assert.notEqual(run("bash", { command }, env("acceptEdits", {}, join(root, "app", "sub"))).verdict, "allow", command);
+  }
+  for (const command of [`if false; then cd ${root}; fi; echo x > out`, `case x in y) cd ${root};; esac; echo x > out`]) {
+    assert.notEqual(run("bash", { command }, env("acceptEdits", {}, sibling)).verdict, "allow", command);
+  }
+  verdict("bash", "allow", { command: "cd app; echo x > out" }, env("acceptEdits"));
+});
+
+test("a compound redirect is opened before a cd in the body runs", () => {
+  assert.notEqual(run("bash", { command: "{ cd app; } > out" }, env("acceptEdits", { deny: rules("Edit(out)") })).verdict, "allow");
+  assert.notEqual(run("bash", { command: "{ cd ..; } > out" }, env("acceptEdits", {}, join(root, "app"))).verdict, "allow");
+});

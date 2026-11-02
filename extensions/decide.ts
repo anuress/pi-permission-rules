@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { Config, Mode } from "./config.ts";
 import { isReadOnly, CODE_RUNNERS } from "./readonly.ts";
 import { matchBash, matchPath, parseRule, type Rule, toolFamily } from "./rules.ts";
-import { parse, type Part } from "./shell.ts";
+import { DANGEROUS_ASSIGNMENT, parse, type Part } from "./shell.ts";
 
 export type Call = { tool: string; command?: string; path?: string };
 export type Env = { root: string; cwd: string; mode: Mode; config: Config; session: Rule[]; git?: (args: string[], cwd: string) => string | null };
@@ -24,7 +24,7 @@ type Verdict = Decision["verdict"];
 type Evaluation = { verdict: Verdict; flag?: Flag; item: DecisionItem };
 
 const MODES: readonly Mode[] = ["default", "acceptEdits", "plan"];
-const DANGEROUS_ASSIGNMENT = /^(?:LD_.*|DYLD_.*|GIT_.*|SSH_.*|PATH|PAGER|.*_PAGER|EDITOR|VISUAL|LESSOPEN|LESSCLOSE|BASH_ENV|ENV|NODE_OPTIONS|NODE_PATH|PYTHON.*|PERL5.*|RUBYOPT|RUBYLIB|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|.*_OPTS|PROMPT_COMMAND|IFS|SHELLOPTS|BASHOPTS)$/;
+const READ_VALUE_OPTIONS = new Set(["-a", "-d", "-i", "-n", "-N", "-p", "-t", "-u"]);
 const READ_ARGUMENT_EXEMPT_COMMANDS = new Set(["echo", "printf", "read", "test", "[", "cd", "pwd", "basename", "dirname", "realpath", "true", "false", ":", "which"]);
 
 function physical(path: string): string {
@@ -150,6 +150,32 @@ function dangerousAssignment(part: Part): string | undefined {
   return undefined;
 }
 
+// Names `read` assigns, including array targets; a dynamic name is not knowable.
+function readAssignment(part: Part): string | undefined {
+  if (part.argv[0] !== "read") return undefined;
+  const argv = part.argv;
+  const names: string[] = [];
+  for (let i = 1; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--") {
+      names.push(...argv.slice(i + 1));
+      break;
+    }
+    if (!arg.startsWith("-") || arg === "-") {
+      names.push(...argv.slice(i));
+      break;
+    }
+    for (let j = 1; j < arg.length; j++) {
+      if (!READ_VALUE_OPTIONS.has(`-${arg[j]}`)) continue;
+      const attached = arg.slice(j + 1);
+      if (arg[j] === "a") names.push(attached || argv[++i] || "");
+      else if (!attached) i++;
+      break;
+    }
+  }
+  return names.find((name) => !name || /[$`]/.test(name) || DANGEROUS_ASSIGNMENT.test(name));
+}
+
 function hasReadRules(env: Env): boolean {
   return [...env.config.ask, ...env.config.deny].some((rule) => rule.tool === "Read");
 }
@@ -180,6 +206,8 @@ function evaluatePart(part: Part, env: Env): Evaluation {
 
   const unsafeAssignment = dangerousAssignment(part);
   if (unsafeAssignment) return evaluated("part", part.text, "ask", `dangerous env ${unsafeAssignment}`);
+  const readTarget = readAssignment(part);
+  if (readTarget) return evaluated("part", part.text, "ask", `dangerous env ${readTarget}`);
   const allow = partRule(env.config.allow, part);
   if (allow) return evaluated("part", part.text, "allow", `allow rule ${allow.text}`);
   const session = partRule(env.session, part);
@@ -248,7 +276,9 @@ function evaluateBash(call: Call, env: Env): Decision {
     evaluations.push(evaluatePart(part, env));
     for (let index = 0; index < part.redirects.length; index++) {
       const target = part.redirects[index];
-      const targetPath = redirectPath(target, dir, part.redirectGlobs[index]);
+      // Bash opens a compound redirect before the body runs, so a cd in the body is not applied.
+      const redirectDir = part.compoundRedirect && seenCd.get(part.scope) ? null : dir;
+      const targetPath = redirectPath(target, redirectDir, part.redirectGlobs[index]);
       evaluations.push(evaluatePath(targetPath.path, "Edit", { ...env, cwd: "/" }, targetPath.outside, "redirect"));
     }
     for (let index = 0; index < part.inputs.length; index++) {
@@ -287,14 +317,10 @@ function evaluateBash(call: Call, env: Env): Decision {
     const changesDirectory = argv[0] === "pushd" || argv[0] === "popd"
       || argv[0] === "cd" || ((argv[0] === "builtin" || argv[0] === "command") && argv[1] === "cd");
     if (changesDirectory) {
-      if (argv[0] === "cd") {
-        if (seenCd.get(part.scope)) dirs.set(part.scope, null);
-        else dirs.set(part.scope, cdDirectory(part, dir));
-        seenCd.set(part.scope, true);
-      } else {
-        dirs.set(part.scope, null);
-        seenCd.set(part.scope, true);
-      }
+      // A second cd, or one in a body that may not run, leaves the directory unknown.
+      if (argv[0] === "cd" && !seenCd.get(part.scope) && !part.conditional) dirs.set(part.scope, cdDirectory(part, dir));
+      else dirs.set(part.scope, null);
+      seenCd.set(part.scope, true);
     }
   }
 
