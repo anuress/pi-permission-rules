@@ -150,13 +150,13 @@ function dangerousAssignment(part: Part): string | undefined {
   return undefined;
 }
 
-const READ_WRAPPERS = new Set(["builtin", "command", "time"]);
-const DIR_WRAPPERS = new Set(["builtin", "command"]);
+// All three wrappers run the command in the current shell and none takes a value option.
+const WRAPPERS = new Set(["builtin", "command", "time"]);
 
-// Strips leading wrappers and their flags; none of them takes a value.
-function unwrapWrappers(argv: string[], wrappers: ReadonlySet<string>): string[] {
+// Strips leading `builtin`, `command` and `time` wrappers with their flags.
+function unwrapWrappers(argv: string[]): string[] {
   let rest = argv;
-  while (rest.length > 0 && wrappers.has(rest[0])) {
+  while (rest.length > 0 && WRAPPERS.has(rest[0])) {
     let i = 1;
     while (i < rest.length && rest[i].startsWith("-") && rest[i] !== "-") {
       if (rest[i] === "--") {
@@ -171,13 +171,13 @@ function unwrapWrappers(argv: string[], wrappers: ReadonlySet<string>): string[]
 }
 
 function changesDir(argv: string[]): boolean {
-  const word = unwrapWrappers(argv, DIR_WRAPPERS)[0];
+  const word = unwrapWrappers(argv)[0];
   return word === "cd" || word === "pushd" || word === "popd";
 }
 
 // Names `read` assigns, including array targets; a dynamic name is not knowable.
 function readAssignment(part: Part): string | undefined {
-  const argv = unwrapWrappers(part.argv, READ_WRAPPERS);
+  const argv = unwrapWrappers(part.argv);
   if (argv[0] !== "read") return undefined;
   const names: string[] = [];
   for (let i = 1; i < argv.length; i++) {

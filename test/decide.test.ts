@@ -731,3 +731,13 @@ test("fix round 2: loop context crosses subshells, substitutions and wrappers", 
   assert.notEqual(run("bash", { command: "for f in a b; do for g in c d; do echo x > out; done; cd ..; done" },
     inApp).verdict, "allow");
 });
+
+test("fix round 3: a time-wrapped directory change is a directory change", () => {
+  const timeRule = env("acceptEdits", { allow: rules("Bash(time:*)") });
+  for (const command of ["time cd ..; echo x > out", "time -p cd ..; echo x > out", "time pushd ..; echo x > out"]) {
+    assert.notEqual(run("bash", { command }, timeRule).verdict, "allow", command);
+  }
+  assert.notEqual(run("bash", { command: "for f in a b c; do echo x > out; time cd ..; done" },
+    env("acceptEdits", { allow: rules("Bash(time cd:*)") }, join(root, "app"))).verdict, "allow");
+  verdict("bash", "allow", { command: "cd app; echo x > out" }, env("acceptEdits"));
+});
