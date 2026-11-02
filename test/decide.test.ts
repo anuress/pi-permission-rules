@@ -755,6 +755,12 @@ test("fix round 4: deep substitutions, time before a group and time cd", () => {
   assert.ok(timeGroup.flags.some((flag) => flag.rule.includes("time before a compound command")));
   assert.notEqual(run("bash", { command: "time { cd ../..; }; echo x > out" },
     env("acceptEdits", { allow: rules("Bash(time:*)") }, join(root, "app"))).verdict, "allow");
+  // `time !` hides the next command the same way.
+  const timeRule = env("acceptEdits", { allow: rules("Bash(time:*)") });
+  assert.notEqual(run("bash", { command: "time ! cd ..; echo x > out" }, timeRule).verdict, "allow");
+  for (const command of ["time ! { cd ../..; }; echo x > out", "time -p ! { cd ../..; }; echo x > out"]) {
+    assert.notEqual(run("bash", { command }, env("acceptEdits", { allow: rules("Bash(time:*)") }, join(root, "app"))).verdict, "allow", command);
+  }
   verdict("bash", "allow", { command: "time cd app; echo x > out" },
     env("acceptEdits", { allow: rules("Bash(time cd:*)") }));
   verdict("bash", "allow", { command: "cd app; echo x > out" }, env("acceptEdits"));

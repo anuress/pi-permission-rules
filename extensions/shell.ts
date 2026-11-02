@@ -123,7 +123,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
       if (timePending) {
         if (!quoted && !w.startsWith("-")) {
           timePending = false;
-          if (w === "{" || w === "[[" || TIME_COMPOUND.has(w)) flag(st, "time before a compound command");
+          if (w === "{" || w === "!" || w === "[[" || TIME_COMPOUND.has(w)) flag(st, "time before a compound command");
         }
       }
       if (loopHeader && atStart) {
