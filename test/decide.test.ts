@@ -695,3 +695,14 @@ test("a compound redirect is opened before a cd in the body runs", () => {
   assert.notEqual(run("bash", { command: "{ cd app; } > out" }, env("acceptEdits", { deny: rules("Edit(out)") })).verdict, "allow");
   assert.notEqual(run("bash", { command: "{ cd ..; } > out" }, env("acceptEdits", {}, join(root, "app"))).verdict, "allow");
 });
+
+test("fix round 1: brace groups, loop-body redirects and wrapped read stay closed", () => {
+  assert.notEqual(run("bash", { command: "for f in a b c; { { echo; }; cd ..; }; echo x > out" }, env("acceptEdits", {}, join(root, "app", "sub"))).verdict, "allow");
+  for (const command of ["for f in a b c d; do echo x > out; cd ..; done", "while true; do echo x > out; cd ..; done"]) {
+    assert.notEqual(run("bash", { command }, env("acceptEdits", {}, join(root, "app"))).verdict, "allow", command);
+  }
+  assert.notEqual(run("bash", { command: "builtin read PATH <<< /tmp/evil; ls" }, env("acceptEdits", { allow: rules("Bash(builtin read:*)") })).verdict, "allow");
+  assert.notEqual(run("bash", { command: "command read PATH <<< /tmp/evil; ls" }, env("acceptEdits", { allow: rules("Bash(command read:*)") })).verdict, "allow");
+  verdict("bash", "allow", { command: "cd app; echo x > out" }, env("acceptEdits"));
+  verdict("bash", "allow", { command: "{ cd app; }; echo x > out" }, env("acceptEdits"));
+});

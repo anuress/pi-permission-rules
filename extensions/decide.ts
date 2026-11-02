@@ -152,8 +152,14 @@ function dangerousAssignment(part: Part): string | undefined {
 
 // Names `read` assigns, including array targets; a dynamic name is not knowable.
 function readAssignment(part: Part): string | undefined {
-  if (part.argv[0] !== "read") return undefined;
-  const argv = part.argv;
+  let argv = part.argv;
+  if (argv[0] === "builtin" || argv[0] === "command") {
+    let start = 1;
+    while (start < argv.length && argv[start].startsWith("-") && argv[start] !== "--") start++;
+    if (argv[start] === "--") start++;
+    if (argv[start] !== "read") return undefined;
+    argv = argv.slice(start);
+  } else if (argv[0] !== "read") return undefined;
   const names: string[] = [];
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i];
@@ -259,6 +265,10 @@ function evaluateBash(call: Call, env: Env): Decision {
     return decision("ask", [empty.flag!], empty.flag, [empty.item]);
   }
 
+  const changesDir = (argv: string[]) => argv[0] === "pushd" || argv[0] === "popd"
+    || argv[0] === "cd" || ((argv[0] === "builtin" || argv[0] === "command") && argv[1] === "cd");
+  // A loop body that changes directory moves every later iteration's earlier parts too.
+  const repeatedDirs = new Set(parsed.parts.filter((part) => part.repeated && changesDir(part.argv)).map((part) => part.scope));
   const dirs = new Map<string, string | null>([["", physical(env.cwd)]]);
   const seenCd = new Map<string, boolean>([["", false]]);
   const dirFor = (scope: string): string | null => {
@@ -272,7 +282,7 @@ function evaluateBash(call: Call, env: Env): Decision {
   };
   const evaluations: Evaluation[] = [];
   for (const part of parsed.parts) {
-    const dir = dirFor(part.scope);
+    const dir = part.repeated && repeatedDirs.has(part.scope) ? null : dirFor(part.scope);
     evaluations.push(evaluatePart(part, env));
     for (let index = 0; index < part.redirects.length; index++) {
       const target = part.redirects[index];
@@ -314,9 +324,7 @@ function evaluateBash(call: Call, env: Env): Decision {
       }
     }
     const argv = part.argv;
-    const changesDirectory = argv[0] === "pushd" || argv[0] === "popd"
-      || argv[0] === "cd" || ((argv[0] === "builtin" || argv[0] === "command") && argv[1] === "cd");
-    if (changesDirectory) {
+    if (changesDir(argv)) {
       // A second cd, or one in a body that may not run, leaves the directory unknown.
       if (argv[0] === "cd" && !seenCd.get(part.scope) && !part.conditional) dirs.set(part.scope, cdDirectory(part, dir));
       else dirs.set(part.scope, null);

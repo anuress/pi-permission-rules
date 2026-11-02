@@ -1,7 +1,7 @@
 // Shell lexer: splits a bash command into parts so rules match per sub-command,
 // never against raw text. Fails closed (`unsafe`) on anything it cannot vouch for.
 
-export type Part = { argv: string[]; assignments: string[]; redirects: string[]; inputs: string[]; globs: boolean[]; dynamic: boolean[]; redirectGlobs: boolean[]; inputGlobs: boolean[]; text: string; scope: string; compoundRedirect?: boolean; conditional?: boolean };
+export type Part = { argv: string[]; assignments: string[]; redirects: string[]; inputs: string[]; globs: boolean[]; dynamic: boolean[]; redirectGlobs: boolean[]; inputGlobs: boolean[]; text: string; scope: string; compoundRedirect?: boolean; conditional?: boolean; repeated?: boolean };
 export type ParseResult = { parts: Part[]; unsafe?: string };
 
 type State = { unsafe?: string };
@@ -74,14 +74,19 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
   let compoundRedirect = false;
   const cases: { phase: "subject" | "patterns" | "body"; patternStarted: boolean }[] = [];
   // A cd inside these constructs is unknown: the body may not run, or run many times.
-  const controls: ("if" | "loop" | "brace" | "case")[] = [];
+  const controls: ("if" | "loop" | "brace" | "group" | "case")[] = [];
   const scopes: { id: string; children: number }[] = [{ id: scope, children: 0 }];
   const heredocs: Heredoc[] = [];
   let i = start;
 
-  const openControl = (kind: "if" | "loop" | "brace" | "case") => controls.push(kind);
-  const closeControl = (kind: "if" | "loop" | "brace" | "case") => {
+  const openControl = (kind: "if" | "loop" | "brace" | "group" | "case") => controls.push(kind);
+  const closeControl = (kind: "if" | "loop" | "brace" | "group" | "case") => {
     if (controls[controls.length - 1] === kind) controls.pop();
+  };
+  // `}` closes the brace it belongs to, never an enclosing loop body's brace.
+  const closeBrace = () => {
+    const kind = controls[controls.length - 1];
+    if (kind === "brace" || kind === "group") controls.pop();
   };
 
   const endWord = () => {
@@ -147,7 +152,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
         } else if (caseState?.phase === "patterns") {
           caseState.patternStarted = true;
         } else if (controlStart && !quoted && w === "}") {
-          closeControl("brace");
+          closeBrace();
           compoundEndPending = true;
         } else if (controlStart && !quoted && (w === "fi" || w === "done")) {
           closeControl(w === "fi" ? "if" : "loop");
@@ -155,6 +160,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
         } else if (controlStart && !quoted && RESERVED.has(w)) {
           if (w === "if") openControl("if");
           else if (w === "while" || w === "until") openControl("loop");
+          else if (w === "{") openControl("group");
           compoundEndPending = false;
         } else if (atStart && ASSIGNMENT.test(raw)) {
           compoundEndPending = false;
@@ -187,7 +193,10 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
     if (argv.length > 0) checkRunner(argv, stdinFed, st);
     stdinFed = false;
     if (argv.length > 0 || redirects.length > 0 || inputs.length > 0 || assignments.length > 0) {
-      out.push({ argv, assignments, redirects, inputs, globs, dynamic, redirectGlobs, inputGlobs, text: argv.length ? argv.join(" ") : assignments.join(" "), scope: scopes[scopes.length - 1].id, ...(compoundRedirect ? { compoundRedirect: true } : {}), ...(controls.length > 0 ? { conditional: true } : {}) });
+      // `conditional`: may not run. `repeated`: a loop body, so it may run again after its own cd.
+      const conditional = controls.some((kind) => kind !== "group");
+      const repeated = controls.some((kind) => kind === "loop" || kind === "brace");
+      out.push({ argv, assignments, redirects, inputs, globs, dynamic, redirectGlobs, inputGlobs, text: argv.length ? argv.join(" ") : assignments.join(" "), scope: scopes[scopes.length - 1].id, ...(compoundRedirect ? { compoundRedirect: true } : {}), ...(conditional ? { conditional: true } : {}), ...(repeated ? { repeated: true } : {}) });
     }
     out.push(...inner);
     argv = [];
