@@ -4,7 +4,7 @@
 export type Part = { argv: string[]; assignments: string[]; redirects: string[]; inputs: string[]; globs: boolean[]; dynamic: boolean[]; redirectGlobs: boolean[]; inputGlobs: boolean[]; text: string; scope: string; compoundRedirect?: boolean; conditional?: boolean; loops?: number[] };
 export type ParseResult = { parts: Part[]; unsafe?: string };
 
-type State = { unsafe?: string };
+type State = { unsafe?: string; nextLoop?: number };
 type Heredoc = { term: string; strip: boolean; expand: boolean };
 type Mode = null | "redir" | "input" | "skip" | "heredoc";
 
@@ -14,6 +14,8 @@ const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 export const DANGEROUS_ASSIGNMENT = /^(?:LD_.*|DYLD_.*|GIT_.*|SSH_.*|PATH|PAGER|.*_PAGER|EDITOR|VISUAL|LESSOPEN|LESSCLOSE|BASH_ENV|ENV|NODE_OPTIONS|NODE_PATH|PYTHON.*|PERL5.*|RUBYOPT|RUBYLIB|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|.*_OPTS|PROMPT_COMMAND|IFS|SHELLOPTS|BASHOPTS)$/;
 // Reserved words dropped at command position so the real command is matched.
 const RESERVED = new Set(["if", "then", "else", "elif", "do", "while", "until", "!", "{", "}", "fi", "done", "esac"]);
+// Compound commands `time` would run in the current shell, out of the lexer's sight.
+const TIME_COMPOUND = new Set(["if", "for", "select", "while", "until", "case", "function"]);
 const SHELLS = new Set(["bash", "sh", "zsh"]);
 const FD_DUP = /^(\d+-?|-)(?![^\s;|&<>()])/;
 
@@ -72,6 +74,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
   let loopHeader: { phase: "name" | "after-name" | "words" | "body"; keyword: "for" | "select" } | undefined;
   let compoundEndPending = false;
   let compoundRedirect = false;
+  let timePending = false;
   const cases: { phase: "subject" | "patterns" | "body"; patternStarted: boolean }[] = [];
   // A cd inside these constructs is unknown: the body may not run, or run many times.
   type Control = { kind: "if" | "loop" | "brace" | "group" | "case"; loop?: number };
@@ -94,7 +97,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
     const kind = controls[controls.length - 1]?.kind;
     if (kind === "brace" || kind === "group") controls.pop();
   };
-  const currentLoops = () => controls.flatMap((control) => control.loop === undefined ? [] : [control.loop]);
+  const currentLoops = () => [...parentLoops, ...controls.flatMap((control) => control.loop === undefined ? [] : [control.loop])];
 
   const endWord = () => {
     if (!inWord) return;
@@ -116,6 +119,13 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
       const controlStart = atStart && assignments.length === 0;
       const caseState = cases[cases.length - 1];
       let handled = false;
+      // `time` runs a following compound command in the current shell; the lexer cannot follow it.
+      if (timePending) {
+        if (!quoted && !w.startsWith("-")) {
+          timePending = false;
+          if (w === "{" || w === "[[" || TIME_COMPOUND.has(w)) flag(st, "time before a compound command");
+        }
+      }
       if (loopHeader && atStart) {
         if (loopHeader.phase === "name" && !quoted && /^[A-Za-z_][A-Za-z0-9_]*$/.test(w)) {
           if (DANGEROUS_ASSIGNMENT.test(w)) flag(st, `dangerous loop variable ${w}`);
@@ -179,6 +189,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
           dynamic.push(wordDynamic);
         }
       }
+      if (!handled && controlStart && !quoted && w === "time") timePending = true;
     }
     w = "";
     wordGlob = false;
@@ -194,6 +205,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
   };
   const endCmd = () => {
     endWord();
+    timePending = false;
     if (mode === "heredoc") flag(st, "heredoc without delimiter");
     if (mode === "redir" || mode === "input") flag(st, `redirect without target`);
     mode = null;
@@ -202,7 +214,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
     if (argv.length > 0 || redirects.length > 0 || inputs.length > 0 || assignments.length > 0) {
       // `conditional`: may not run. `loops`: the loop bodies it re-runs in, inherited by nested scans.
       const conditional = controls.some((control) => control.kind !== "group");
-      const loops = [...parentLoops, ...currentLoops()];
+      const loops = currentLoops();
       out.push({ argv, assignments, redirects, inputs, globs, dynamic, redirectGlobs, inputGlobs, text: argv.length ? argv.join(" ") : assignments.join(" "), scope: scopes[scopes.length - 1].id, ...(compoundRedirect ? { compoundRedirect: true } : {}), ...(conditional ? { conditional: true } : {}), ...(loops.length > 0 ? { loops } : {}) });
     }
     out.push(...inner);

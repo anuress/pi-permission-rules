@@ -741,3 +741,21 @@ test("fix round 3: a time-wrapped directory change is a directory change", () =>
     env("acceptEdits", { allow: rules("Bash(time cd:*)") }, join(root, "app"))).verdict, "allow");
   verdict("bash", "allow", { command: "cd app; echo x > out" }, env("acceptEdits"));
 });
+
+test("fix round 4: deep substitutions, time before a group and time cd", () => {
+  const inApp = env("acceptEdits", {}, join(root, "app"));
+  for (const command of [
+    "for f in a b c; do echo $(echo $(echo x > out)); cd ..; done",
+    "for f in a b c; do echo `echo $(echo x > out)`; cd ..; done",
+  ]) assert.notEqual(run("bash", { command }, inApp).verdict, "allow", command);
+  const deep = run("bash", { command: "for f in a b c; do echo $(echo $(echo x > out)); cd ..; done" }, inApp);
+  assert.ok(deep.items.some((item) => item.label === "/out" && item.verdict === "ask"));
+  const timeGroup = run("bash", { command: "time { cd ../..; }; echo x > out" },
+    env("acceptEdits", { allow: rules("Bash(time:*)") }, join(root, "app")));
+  assert.ok(timeGroup.flags.some((flag) => flag.rule.includes("time before a compound command")));
+  assert.notEqual(run("bash", { command: "time { cd ../..; }; echo x > out" },
+    env("acceptEdits", { allow: rules("Bash(time:*)") }, join(root, "app"))).verdict, "allow");
+  verdict("bash", "allow", { command: "time cd app; echo x > out" },
+    env("acceptEdits", { allow: rules("Bash(time cd:*)") }));
+  verdict("bash", "allow", { command: "cd app; echo x > out" }, env("acceptEdits"));
+});
