@@ -1,7 +1,7 @@
 // Shell lexer: splits a bash command into parts so rules match per sub-command,
 // never against raw text. Fails closed (`unsafe`) on anything it cannot vouch for.
 
-export type Part = { argv: string[]; assignments: string[]; redirects: string[]; inputs: string[]; globs: boolean[]; dynamic: boolean[]; redirectGlobs: boolean[]; inputGlobs: boolean[]; text: string; scope: string; compoundRedirect?: boolean; conditional?: boolean; repeated?: boolean };
+export type Part = { argv: string[]; assignments: string[]; redirects: string[]; inputs: string[]; globs: boolean[]; dynamic: boolean[]; redirectGlobs: boolean[]; inputGlobs: boolean[]; text: string; scope: string; compoundRedirect?: boolean; conditional?: boolean; loops?: number[] };
 export type ParseResult = { parts: Part[]; unsafe?: string };
 
 type State = { unsafe?: string };
@@ -48,7 +48,7 @@ function readBacktick(s: string, start: number): { text: string; end: number } {
   return { text, end: -1 };
 }
 
-function scan(s: string, st: State, start: number, closer: ")" | null, scope = ""): { parts: Part[]; end: number } {
+function scan(s: string, st: State, start: number, closer: ")" | null, scope = "", parentLoops: number[] = []): { parts: Part[]; end: number } {
   const out: Part[] = [];
   let argv: string[] = [];
   let assignments: string[] = [];
@@ -74,20 +74,27 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
   let compoundRedirect = false;
   const cases: { phase: "subject" | "patterns" | "body"; patternStarted: boolean }[] = [];
   // A cd inside these constructs is unknown: the body may not run, or run many times.
-  const controls: ("if" | "loop" | "brace" | "group" | "case")[] = [];
+  type Control = { kind: "if" | "loop" | "brace" | "group" | "case"; loop?: number };
+  const controls: Control[] = [];
   const scopes: { id: string; children: number }[] = [{ id: scope, children: 0 }];
   const heredocs: Heredoc[] = [];
   let i = start;
 
-  const openControl = (kind: "if" | "loop" | "brace" | "group" | "case") => controls.push(kind);
+  const openControl = (kind: "if" | "loop" | "brace" | "group" | "case") => controls.push({ kind });
+  // A loop body gets one id that nested scans inherit, so decide can judge it as a whole.
+  const openLoop = (kind: "loop" | "brace") => {
+    st.nextLoop = (st.nextLoop ?? 0) + 1;
+    controls.push({ kind, loop: st.nextLoop });
+  };
   const closeControl = (kind: "if" | "loop" | "brace" | "group" | "case") => {
-    if (controls[controls.length - 1] === kind) controls.pop();
+    if (controls[controls.length - 1]?.kind === kind) controls.pop();
   };
   // `}` closes the brace it belongs to, never an enclosing loop body's brace.
   const closeBrace = () => {
-    const kind = controls[controls.length - 1];
+    const kind = controls[controls.length - 1]?.kind;
     if (kind === "brace" || kind === "group") controls.pop();
   };
+  const currentLoops = () => controls.flatMap((control) => control.loop === undefined ? [] : [control.loop]);
 
   const endWord = () => {
     if (!inWord) return;
@@ -119,13 +126,13 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
           handled = true;
         } else if (loopHeader.phase === "after-name" && !quoted && w === "do") {
           loopHeader = undefined;
-          openControl("loop");
+          openLoop("loop");
           handled = true;
         } else if (loopHeader.phase === "words") {
           handled = true;
         } else if (loopHeader.phase === "body" && !quoted && (w === "do" || w === "{")) {
           loopHeader = undefined;
-          openControl(w === "{" ? "brace" : "loop");
+          openLoop(w === "{" ? "brace" : "loop");
           handled = true;
         } else {
           flag(st, "malformed for/select header");
@@ -159,7 +166,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
           compoundEndPending = true;
         } else if (controlStart && !quoted && RESERVED.has(w)) {
           if (w === "if") openControl("if");
-          else if (w === "while" || w === "until") openControl("loop");
+          else if (w === "while" || w === "until") openLoop("loop");
           else if (w === "{") openControl("group");
           compoundEndPending = false;
         } else if (atStart && ASSIGNMENT.test(raw)) {
@@ -193,10 +200,10 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
     if (argv.length > 0) checkRunner(argv, stdinFed, st);
     stdinFed = false;
     if (argv.length > 0 || redirects.length > 0 || inputs.length > 0 || assignments.length > 0) {
-      // `conditional`: may not run. `repeated`: a loop body, so it may run again after its own cd.
-      const conditional = controls.some((kind) => kind !== "group");
-      const repeated = controls.some((kind) => kind === "loop" || kind === "brace");
-      out.push({ argv, assignments, redirects, inputs, globs, dynamic, redirectGlobs, inputGlobs, text: argv.length ? argv.join(" ") : assignments.join(" "), scope: scopes[scopes.length - 1].id, ...(compoundRedirect ? { compoundRedirect: true } : {}), ...(conditional ? { conditional: true } : {}), ...(repeated ? { repeated: true } : {}) });
+      // `conditional`: may not run. `loops`: the loop bodies it re-runs in, inherited by nested scans.
+      const conditional = controls.some((control) => control.kind !== "group");
+      const loops = [...parentLoops, ...currentLoops()];
+      out.push({ argv, assignments, redirects, inputs, globs, dynamic, redirectGlobs, inputGlobs, text: argv.length ? argv.join(" ") : assignments.join(" "), scope: scopes[scopes.length - 1].id, ...(compoundRedirect ? { compoundRedirect: true } : {}), ...(conditional ? { conditional: true } : {}), ...(loops.length > 0 ? { loops } : {}) });
     }
     out.push(...inner);
     argv = [];
@@ -232,13 +239,13 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
       i = s.length;
       return false;
     }
-    sub(scan(r.text, st, 0, null, childScope()).parts);
+    sub(scan(r.text, st, 0, null, childScope(), currentLoops()).parts);
     i = r.end;
     return true;
   };
   const dollarParen = () => {
     if (s[i + 2] === "(") return arith();
-    const r = scan(s, st, i + 2, ")", childScope());
+    const r = scan(s, st, i + 2, ")", childScope(), currentLoops());
     sub(r.parts);
     i = r.end;
   };
@@ -301,14 +308,14 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
     while (j < s.length) {
       const c = s[j];
       if (c === "$" && s[j + 1] === "(") {
-        const r = scan(s, st, j + 2, ")", childScope());
+        const r = scan(s, st, j + 2, ")", childScope(), currentLoops());
         inner.push(...r.parts);
         body += "$(…)";
         j = r.end;
       } else if (c === "`") {
         const r = readBacktick(s, j + 1);
         if (r.end < 0) break;
-        inner.push(...scan(r.text, st, 0, null, childScope()).parts);
+        inner.push(...scan(r.text, st, 0, null, childScope(), currentLoops()).parts);
         body += "`…`";
         j = r.end;
       } else if (c === "(") {
@@ -347,7 +354,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
           body += "$(())";
           j = end + 2;
         } else {
-          const r = scan(s, st, j + 2, ")", childScope());
+          const r = scan(s, st, j + 2, ")", childScope(), currentLoops());
           inner.push(...r.parts);
           body += "$(…)";
           j = r.end;
@@ -355,7 +362,7 @@ function scan(s: string, st: State, start: number, closer: ")" | null, scope = "
       } else if (c === "`") {
         const r = readBacktick(s, j + 1);
         if (r.end < 0) break;
-        inner.push(...scan(r.text, st, 0, null, childScope()).parts);
+        inner.push(...scan(r.text, st, 0, null, childScope(), currentLoops()).parts);
         body += "`…`";
         j = r.end;
       } else if (c === "(") {

@@ -706,3 +706,28 @@ test("fix round 1: brace groups, loop-body redirects and wrapped read stay close
   verdict("bash", "allow", { command: "cd app; echo x > out" }, env("acceptEdits"));
   verdict("bash", "allow", { command: "{ cd app; }; echo x > out" }, env("acceptEdits"));
 });
+
+test("fix round 2: loop context crosses subshells, substitutions and wrappers", () => {
+  const inApp = env("acceptEdits", {}, join(root, "app"));
+  for (const command of [
+    "for f in a b c d; do (echo x > out); cd ..; done",
+    "for f in a b c d; do echo $(echo y > out); cd ..; done",
+    "for f in a b c d; do echo `echo y > out`; cd ..; done",
+  ]) assert.notEqual(run("bash", { command }, inApp).verdict, "allow", command);
+  assert.notEqual(run("bash", { command: "for f in a b c; do echo x > out; command pushd ..; done" },
+    env("acceptEdits", { allow: rules("Bash(command pushd:*)") }, join(root, "app"))).verdict, "allow");
+  const wrapped: [string, string][] = [
+    ["builtin command read PATH <<< /tmp/evil; ls", "Bash(builtin:*)"],
+    ["command builtin read PATH <<< /tmp/evil; ls", "Bash(command:*)"],
+    ["time read PATH <<< /tmp/evil; ls", "Bash(time:*)"],
+  ];
+  for (const [command, rule] of wrapped) {
+    assert.notEqual(run("bash", { command }, env("acceptEdits", { allow: rules(rule) })).verdict, "allow", command);
+  }
+  verdict("bash", "allow", { command: "cd app; echo x > out" }, env("acceptEdits"));
+  // Same rule, other shapes: wrapped cd and a cd in an enclosing loop.
+  assert.notEqual(run("bash", { command: "for f in a b c; do echo x > out; builtin cd ..; done" },
+    env("acceptEdits", { allow: rules("Bash(builtin cd:*)") }, join(root, "app"))).verdict, "allow");
+  assert.notEqual(run("bash", { command: "for f in a b; do for g in c d; do echo x > out; done; cd ..; done" },
+    inApp).verdict, "allow");
+});

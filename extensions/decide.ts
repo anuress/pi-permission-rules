@@ -150,16 +150,35 @@ function dangerousAssignment(part: Part): string | undefined {
   return undefined;
 }
 
+const READ_WRAPPERS = new Set(["builtin", "command", "time"]);
+const DIR_WRAPPERS = new Set(["builtin", "command"]);
+
+// Strips leading wrappers and their flags; none of them takes a value.
+function unwrapWrappers(argv: string[], wrappers: ReadonlySet<string>): string[] {
+  let rest = argv;
+  while (rest.length > 0 && wrappers.has(rest[0])) {
+    let i = 1;
+    while (i < rest.length && rest[i].startsWith("-") && rest[i] !== "-") {
+      if (rest[i] === "--") {
+        i++;
+        break;
+      }
+      i++;
+    }
+    rest = rest.slice(i);
+  }
+  return rest;
+}
+
+function changesDir(argv: string[]): boolean {
+  const word = unwrapWrappers(argv, DIR_WRAPPERS)[0];
+  return word === "cd" || word === "pushd" || word === "popd";
+}
+
 // Names `read` assigns, including array targets; a dynamic name is not knowable.
 function readAssignment(part: Part): string | undefined {
-  let argv = part.argv;
-  if (argv[0] === "builtin" || argv[0] === "command") {
-    let start = 1;
-    while (start < argv.length && argv[start].startsWith("-") && argv[start] !== "--") start++;
-    if (argv[start] === "--") start++;
-    if (argv[start] !== "read") return undefined;
-    argv = argv.slice(start);
-  } else if (argv[0] !== "read") return undefined;
+  const argv = unwrapWrappers(part.argv, READ_WRAPPERS);
+  if (argv[0] !== "read") return undefined;
   const names: string[] = [];
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i];
@@ -265,10 +284,12 @@ function evaluateBash(call: Call, env: Env): Decision {
     return decision("ask", [empty.flag!], empty.flag, [empty.item]);
   }
 
-  const changesDir = (argv: string[]) => argv[0] === "pushd" || argv[0] === "popd"
-    || argv[0] === "cd" || ((argv[0] === "builtin" || argv[0] === "command") && argv[1] === "cd");
-  // A loop body that changes directory moves every later iteration's earlier parts too.
-  const repeatedDirs = new Set(parsed.parts.filter((part) => part.repeated && changesDir(part.argv)).map((part) => part.scope));
+  // A loop body that changes directory moves every later iteration's earlier parts too,
+  // and a loop id covers its nested subshells and substitutions.
+  const loopDirs = new Set<number>();
+  for (const part of parsed.parts) {
+    if (part.loops?.length && changesDir(part.argv)) for (const id of part.loops) loopDirs.add(id);
+  }
   const dirs = new Map<string, string | null>([["", physical(env.cwd)]]);
   const seenCd = new Map<string, boolean>([["", false]]);
   const dirFor = (scope: string): string | null => {
@@ -282,7 +303,7 @@ function evaluateBash(call: Call, env: Env): Decision {
   };
   const evaluations: Evaluation[] = [];
   for (const part of parsed.parts) {
-    const dir = part.repeated && repeatedDirs.has(part.scope) ? null : dirFor(part.scope);
+    const dir = part.loops?.some((id) => loopDirs.has(id)) ? null : dirFor(part.scope);
     evaluations.push(evaluatePart(part, env));
     for (let index = 0; index < part.redirects.length; index++) {
       const target = part.redirects[index];
