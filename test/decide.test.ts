@@ -904,3 +904,24 @@ test("unresolved and attached operands cannot name a permission file", () => {
   verdict("bash", "allow", { command: "./gradlew -Pv=$X" }, env("default", { allow: rules("Bash(./gradlew *)") }));
   verdict("bash", "deny", { command: "cp /tmp/x $PI_CODING_AGENT_DIR/permissions.json" }, env("plan", { allow: rules("Bash(cp:*)") }));
 });
+
+test("brace expansion and variable rebinding cannot dodge the permission file check", () => {
+  const brace = verdict("bash", "ask", { command: "echo x | tee ~/.pi/agent/{p,}ermissions.json" }, env("default", { allow: rules("Bash(tee:*)") }));
+  assert.ok(brace.items.some((item) => item.rule === "built-in permission file protection"));
+  const planned = verdict("bash", "deny", { command: "echo x | tee ~/.pi/agent/{p,}ermissions.json" }, env("plan", { allow: rules("Bash(tee:*)") }));
+  assert.ok(planned.items.some((item) => item.rule === "built-in permission file protection"));
+  // Any brace operand asks, since bash can expand it into the permission file.
+  verdict("bash", "ask", { command: "echo x | tee ~/notes/{a,b}.txt" }, env("default", { allow: rules("Bash(tee:*)") }));
+  verdict("bash", "allow", { command: "echo x | tee ~/notes/plain.txt" }, env("default", { allow: rules("Bash(tee:*)") }));
+
+  const cp = () => env("default", { allow: rules("Bash(cp:*)") });
+  const read = verdict("bash", "ask", { command: "read HOME <<< /x/.pi/agent; cp /tmp/x $HOME/permissions.json" }, cp());
+  assert.equal(read.flags[0].rule, "dangerous env HOME");
+  const other = verdict("bash", "ask", { command: "read PI_CODING_AGENT_DIR <<< /x; cp /tmp/x $PI_CODING_AGENT_DIR/permissions.json" }, cp());
+  assert.equal(other.flags[0].rule, "dangerous env PI_CODING_AGENT_DIR");
+  assert.equal(verdict("bash", "ask", { command: "HOME=/x/.pi/agent cp /tmp/x $HOME/permissions.json" }, cp()).flags[0].rule, "dangerous env HOME");
+  verdict("bash", "ask", { command: "export HOME=/x/.pi/agent; cp /tmp/x $HOME/permissions.json" }, cp());
+  verdict("bash", "ask", { command: "declare HOME=/x/.pi/agent; cp /tmp/x $HOME/permissions.json" }, cp());
+  verdict("bash", "allow", { command: "read name <<< x" });
+  verdict("bash", "allow", { command: "cat ~/.pi/agent/{p,}ermissions.json" });
+});

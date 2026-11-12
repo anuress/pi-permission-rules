@@ -11,7 +11,7 @@ type Mode = null | "redir" | "input" | "skip" | "heredoc";
 const PLACEHOLDER = "$(…)";
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 // Names that change how later commands resolve: shared with the decision logic.
-export const DANGEROUS_ASSIGNMENT = /^(?:LD_.*|DYLD_.*|GIT_.*|SSH_.*|PATH|PAGER|.*_PAGER|EDITOR|VISUAL|LESSOPEN|LESSCLOSE|BASH_ENV|ENV|NODE_OPTIONS|NODE_PATH|PYTHON.*|PERL5.*|RUBYOPT|RUBYLIB|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|.*_OPTS|PROMPT_COMMAND|IFS|SHELLOPTS|BASHOPTS)$/;
+export const DANGEROUS_ASSIGNMENT = /^(?:HOME|PI_CODING_AGENT_DIR|LD_.*|DYLD_.*|GIT_.*|SSH_.*|PATH|PAGER|.*_PAGER|EDITOR|VISUAL|LESSOPEN|LESSCLOSE|BASH_ENV|ENV|NODE_OPTIONS|NODE_PATH|PYTHON.*|PERL5.*|RUBYOPT|RUBYLIB|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|.*_OPTS|PROMPT_COMMAND|IFS|SHELLOPTS|BASHOPTS)$/;
 // Reserved words dropped at command position so the real command is matched.
 const RESERVED = new Set(["if", "then", "else", "elif", "do", "while", "until", "!", "{", "}", "fi", "done", "esac"]);
 // Compound commands `time` would run in the current shell, out of the lexer's sight.

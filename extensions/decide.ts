@@ -313,12 +313,12 @@ function permissionFileArguments(part: Part, dir: string | null, env: Env): Eval
     for (const candidate of words) {
       const known = expandKnownVariables(candidate, env);
       const expanded = homePath(known);
-      if (known.includes("$") || known.includes("`") || expanded === null
+      if (known.includes("$") || known.includes("`") || known.includes("{") || expanded === null
         || part.globs?.[index + 1] || (dir === null && !isAbsolute(expanded))) {
-        // ponytail: an unresolved operand can only name the file through another variable or a
-        // glob, so this keeps allowed shapes such as `-Pv=$X` quiet; the upgrade is asking on
-        // every unresolved write operand.
-        if (/[*?\[]/.test(candidate) || candidate.toLowerCase().includes("perm")) add(candidate);
+        // ponytail: an unresolved operand can only name the file through another variable, a glob or
+        // a brace expansion, so this keeps allowed shapes such as `-Pv=$X` quiet; the upgrade is
+        // asking on every unresolved write operand.
+        if (/[*?\[{]/.test(candidate) || candidate.toLowerCase().includes("perm")) add(candidate);
         continue;
       }
       const path = physical(resolve(dir ?? "/", expanded));
