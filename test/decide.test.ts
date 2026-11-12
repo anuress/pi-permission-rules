@@ -910,9 +910,12 @@ test("brace expansion and variable rebinding cannot dodge the permission file ch
   assert.ok(brace.items.some((item) => item.rule === "built-in permission file protection"));
   const planned = verdict("bash", "deny", { command: "echo x | tee ~/.pi/agent/{p,}ermissions.json" }, env("plan", { allow: rules("Bash(tee:*)") }));
   assert.ok(planned.items.some((item) => item.rule === "built-in permission file protection"));
-  // Any brace operand asks, since bash can expand it into the permission file.
+  // An unquoted brace operand asks, since bash can expand it into the permission file.
   verdict("bash", "ask", { command: "echo x | tee ~/notes/{a,b}.txt" }, env("default", { allow: rules("Bash(tee:*)") }));
   verdict("bash", "allow", { command: "echo x | tee ~/notes/plain.txt" }, env("default", { allow: rules("Bash(tee:*)") }));
+  // A quoted brace is data, not an expansion, so ordinary arguments still run.
+  verdict("bash", "allow", { command: 'git commit -m "use {x} here"' }, env("default", { allow: rules("Bash(git commit:*)") }));
+  verdict("bash", "allow", { command: "curl -d '{\"a\":1,\"b\":2}' http://x" }, env("default", { allow: rules("Bash(curl:*)") }));
 
   const cp = () => env("default", { allow: rules("Bash(cp:*)") });
   const read = verdict("bash", "ask", { command: "read HOME <<< /x/.pi/agent; cp /tmp/x $HOME/permissions.json" }, cp());
