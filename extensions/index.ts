@@ -38,7 +38,7 @@ function createState(ctx: Context, processEnv: NodeJS.ProcessEnv): PermissionSta
 
 function currentEnv(state: PermissionState, cwd: string): Env {
   const { mode } = resolveMode(state.processEnv, state.config, state.sessionMode);
-  return { root: state.project.root, cwd, mode, config: state.config, session: state.session, git };
+  return { root: state.project.root, cwd, mode, config: state.config, session: state.session, agentDir: agentDir(state.processEnv), git };
 }
 
 function notifyStartup(state: PermissionState, ctx: Context): void {

@@ -61,7 +61,7 @@ test("Bash prompt joins distinct suggested rules in flag order", async () => {
 });
 
 test("R43 offers exact persistent rules only for identical commands", async () => {
-  for (const command of ["akasha --help", "make", "git"]) {
+  for (const command of ["akasha --help", "git"]) {
     const exact = `Bash(${command})`;
     const option = `Yes, and don't ask again for ${exact} in this project`;
     const { ui, calls } = fakeUi(option);
@@ -84,7 +84,7 @@ test("R43 suppresses exact rules for wrappers, dynamic text, globs, and unsafe p
     "bash --help", "sh --help", "zsh --help", "python -V", "python3 -V", "node --version", "ruby -v", "perl -v",
     "sudo true", "xargs grep x", "env true", "command true", "nohup true", "time true", "nice true", "timeout 2 true",
     "builtin echo x", "npx command", "eval true", "./bash --help", "awk '{print}'", "gawk '{print}'", "sed -n p", "find .", "exec echo x", "source file", ". file",
-    'rm "$f"', "ls *.kt", "echo a*b", "echo 'a*b'", "akasha $VERSION", "akasha `echo x`", "FOO=1 make",
+    'rm "$f"', "ls *.kt", "echo a*b", "echo 'a*b'", "akasha $VERSION", "akasha `echo x`", "FOO=1 make", "make", "npm run build",
     "gh api repos/o/r", "git config core.pager x", "echo 'unterminated", "",
   ]) {
     const part = parse(command).parts[0];

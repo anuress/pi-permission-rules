@@ -14,6 +14,7 @@ const READ_ONLY_GIT_COMMANDS = new Set([
 
 export const CODE_RUNNERS: ReadonlySet<string> = new Set([
   "bash", "sh", "zsh", "python", "python3", "node", "ruby", "perl", "eval", "sudo", "xargs", "env", "exec", "source", ".",
+  "npm", "pnpm", "yarn", "bun", "deno", "uv", "make", "gradlew",
 ]);
 
 export function isReadOnly(part: Part, extra: readonly string[], hasReadRules = false): boolean {

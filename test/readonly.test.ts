@@ -290,7 +290,8 @@ test("extra commands match argv[0] exactly and allow arbitrary arguments", () =>
 
 test("CODE_RUNNERS is exactly the no-persistent-option command set", () => {
   assert.deepEqual([...CODE_RUNNERS].sort(), [
-    ".", "bash", "env", "eval", "exec", "node", "perl", "python", "python3", "ruby", "sh", "source", "sudo", "xargs", "zsh",
+    ".", "bash", "bun", "deno", "env", "eval", "exec", "gradlew", "make", "node", "npm", "perl", "pnpm", "python",
+    "python3", "ruby", "sh", "source", "sudo", "uv", "xargs", "yarn", "zsh",
   ]);
   assert.ok(CODE_RUNNERS instanceof Set);
 });

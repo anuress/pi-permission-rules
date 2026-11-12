@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { parseRule, type Rule } from "../extensions/rules.ts";
 import type { Config, Mode } from "../extensions/config.ts";
 import { parse } from "../extensions/shell.ts";
-import { decide, isUnattended, resolveMode, suggestRule, toBlock, type Env } from "../extensions/decide.ts";
+import { decide, isUnattended, resolveMode, suggestExactRule, suggestRule, toBlock, type Env } from "../extensions/decide.ts";
 
 const temp = mkdtempSync(join(tmpdir(), "ppr-"));
 const rootPath = join(temp, "repo");
@@ -19,6 +19,9 @@ const sibling = join(temp, "sibling");
 mkdirSync(sibling);
 const link = join(temp, "repo-link");
 symlinkSync(root, link);
+const agentPath = join(temp, "agent");
+mkdirSync(agentPath);
+const agent = realpathSync(agentPath);
 
 function rules(...texts: string[]): Rule[] {
   return texts.map((text) => {
@@ -36,7 +39,7 @@ function config(overrides: Partial<Config> = {}): Config {
 }
 
 function env(mode: Mode = "default", overrides: Partial<Config> = {}, cwd = root): Env {
-  return { root, cwd, mode, config: config(overrides), session: [] };
+  return { root, cwd, mode, config: config(overrides), session: [], agentDir: agent };
 }
 
 function run(tool: string, options: { command?: string; path?: string } = {}, state = env()) {
@@ -235,7 +238,7 @@ test("suggestRule follows command-name heuristic and suppresses code runners", (
   for (const [command, expected] of [
     ["git push origin x", "Bash(git push:*)"],
     ["rm a.txt", "Bash(rm a.txt:*)"],
-    ["npm run build", "Bash(npm run:*)"],
+    ["npm run build", null],
     ["./gradlew :shop:test", null],
     ["curl https://x", null],
     ["python3 x.py", null],
@@ -422,9 +425,9 @@ test("R41 never suggests a one-word prefix rule", () => {
     assert.equal(suggestRule(parse(command).parts[0]), null, command);
   }
   for (const [command, expected] of [
-    ["./gradlew test", "Bash(./gradlew test:*)"],
+    ["./gradlew test", null],
     ["git push origin x", "Bash(git push:*)"],
-    ["npm run build", "Bash(npm run:*)"],
+    ["npm run build", null],
     ["gh pr merge 1", "Bash(gh pr merge:*)"],
   ] as const) assert.equal(suggestRule(parse(command).parts[0]), expected, command);
 });
@@ -791,4 +794,56 @@ test("fix round 5: wrapped cd targets are unknown and a skipped cd does not move
   verdict("bash", "allow", { command: "cd app && echo x > out" }, env("acceptEdits"));
   assert.notEqual(run("bash", { command: "cd .. && echo x > out" }, env("acceptEdits")).verdict, "allow");
   verdict("bash", "allow", { command: "cd app; echo x > out" }, env("acceptEdits"));
+});
+
+test("custom tools with a string command get the bash verdict", () => {
+  const gradlew = env("default", { allow: rules("Bash(./gradlew *)") });
+  verdict("job_run", "allow", { command: "./gradlew :x:test" }, gradlew);
+  const merge = verdict("job_run", "ask", { command: "git merge origin/develop" });
+  assert.equal(merge.flags[0].rule, "no allow rule");
+  verdict("job_run", "deny", { command: "git push origin main" }, env("default", { deny: rules("Bash(git push:*)") }));
+  for (const command of ["git push origin main", "git status && git merge origin/develop", "echo 'unterminated", "ls > note.txt", "./gradlew :x:test"]) {
+    assert.equal(run("job_run", { command }).verdict, run("bash", { command }).verdict, command);
+    assert.equal(run("job_run", { command }, gradlew).verdict, run("bash", { command }, gradlew).verdict, command);
+  }
+});
+
+test("custom tool name rules still win when they are stricter", () => {
+  verdict("job_run", "deny", { command: "ls" }, env("default", { deny: rules("job_run") }));
+  verdict("job_run", "ask", { command: "ls" }, env("default", { ask: rules("job_run") }));
+  const both = verdict("job_run", "ask", { command: "git push" }, env("default", { ask: rules("job_run") }));
+  assert.equal(both.flags[0].rule, "job_run");
+  const stricter = verdict("job_run", "deny", { command: "git push" }, env("default", { ask: rules("job_run"), deny: rules("Bash(git push:*)") }));
+  assert.equal(stricter.flags[0].rule, "Bash(git push:*)");
+});
+
+test("custom tools without a string command keep the tool-name behaviour", () => {
+  assert.deepEqual(verdict("job_run", "allow").items, [{ kind: "tool", label: "job_run", verdict: "allow", rule: "allowed: custom tool" }]);
+  verdict("job_run", "allow", { command: undefined });
+  verdict("job_run", "allow", {}, env("plan"));
+  verdict("job_run", "deny", {}, env("default", { deny: rules("job_run") }));
+  verdict("job_run", "ask", {}, env("default", { ask: rules("job_run") }));
+});
+
+test("package managers and build runners never get a suggested rule", () => {
+  for (const command of ["npm run build", "pnpm install", "yarn test", "bun test", "deno run x.ts", "uv run pytest", "make test", "./gradlew assemble"]) {
+    const part = parse(command).parts[0];
+    assert.equal(suggestRule(part), null, command);
+    assert.equal(suggestExactRule(part), null, command);
+  }
+});
+
+test("permission files ask even with matching allow and session rules", () => {
+  const allowAll = env("default", { allow: rules(`Edit(${agent}/**)`) });
+  verdict("write", "allow", { path: join(agent, "notes.json") }, allowAll);
+  const file = verdict("write", "ask", { path: join(agent, "permissions.json") }, allowAll);
+  assert.equal(file.flags[0].rule, "built-in permission file protection");
+  assert.equal(file.flags[0].sessionGrantDirectory, undefined);
+  assert.equal(file.items[0].sessionGrantDirectory, undefined);
+  verdict("edit", "ask", { path: join(agent, "permissions", "repo.json") }, { ...allowAll, session: rules(`Edit(${agent}/**)`) });
+  const redirect = verdict("bash", "ask", { command: `echo x > ${join(agent, "permissions", "foo.json")}` }, env("acceptEdits"));
+  assert.equal(redirect.flags[0].rule, "built-in permission file protection");
+  assert.equal(redirect.flags[0].sessionGrantDirectory, undefined);
+  verdict("write", "deny", { path: join(agent, "permissions.json") }, env("plan"));
+  verdict("bash", "deny", { command: `echo x > ${join(agent, "permissions.json")}` }, env("plan"));
 });

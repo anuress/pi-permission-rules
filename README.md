@@ -33,7 +33,7 @@ Rules use Claude Code syntax:
 
 A Bash rule without wildcards matches exactly after the shell lexer parses the part. A suffix `:*` matches a prefix on a word boundary: `Bash(git log:*)` matches `git log` and `git log -5`, but not `git logx`. Other `*` wildcards match within that command part. Path globs use `*` within one path segment, `?` for one non-slash character, and `**` across directories. Absolute and `~/` path patterns are used as given; relative path patterns are anchored at the project root. Relative tool-call paths are normalized from pi's current working directory; relative Bash redirect targets use the shell's current directory.
 
-Rule lists of each kind are combined as a union. A matching deny blocks first, then a matching ask requires approval. Otherwise, allow rules, session grants, and the mode determine the result. In `plan` mode, non-read-only Bash parts and edits are denied regardless of allow rules. Custom tools are allowed unless a matching `ask` or `deny` rule applies; custom-tool `allow` rules are not needed because they are already allowed by default. `powershell` is a special case: it always asks unless a bare `powershell` deny rule matches; `plan` denies it.
+Rule lists of each kind are combined as a union. A matching deny blocks first, then a matching ask requires approval. Otherwise, allow rules, session grants, and the mode determine the result. In `plan` mode, non-read-only Bash parts and edits are denied regardless of allow rules. Custom tools are allowed unless a matching `ask` or `deny` rule applies; custom-tool `allow` rules are not needed because they are already allowed by default. A custom tool whose input has a string `command` (for example `job_run` from pi-jobs) is checked exactly like `bash` with that command, so `Bash` rules and redirect checks apply to it and `plan` mode denies its non-read-only commands; a name-matching ask or deny rule for the tool still wins when it is stricter. A custom tool without a string `command` keeps the tool-name behaviour. `powershell` is a special case: it always asks unless a bare `powershell` deny rule matches; `plan` denies it.
 
 ## Config files
 
@@ -67,7 +67,7 @@ Example global or per-project settings:
 }
 ```
 
-The repo file may contain only `permissions.ask` and `permissions.deny` from this example. For global settings, keep `ask: ["Edit(**/.env*)", "Edit(**/.ssh/**)"]` to protect secrets; writes to any `.git` directory are protected by a built-in ask (and denied in `plan` mode), independent of configured rules.
+The repo file may contain only `permissions.ask` and `permissions.deny` from this example. For global settings, keep `ask: ["Edit(**/.env*)", "Edit(**/.ssh/**)"]` to protect secrets; writes to any `.git` directory are protected by a built-in ask (and denied in `plan` mode), independent of configured rules. The extension's own permission files (`~/.pi/agent/permissions.json` and the files under `~/.pi/agent/permissions/`, or the same paths under `PI_CODING_AGENT_DIR` when set) are protected the same way: edits and Bash output redirects to them ask even when an allow or session rule matches, `plan` denies them, and the session edit-grant option is never offered for them.
 
 ## Modes
 
@@ -110,7 +110,7 @@ Global and per-project `readOnlyCommands` settings can add command names without
 When a human is available, the prompt shows the tool, the command parts or paths that triggered the ask, and the matching rule (or `no allow rule`). Available options are:
 
 1. `Yes` — allow this call once.
-2. `Yes, and don't ask again for <rules> in this project` — for eligible Bash parts, save suggested or exact-command rules to the per-project file and apply them to the session. Exact `Bash(<part>)` rules match only that same parsed part; they are offered only for fully parsed static commands, not code runners or wrappers (`bash`, `python`, `npx`, `xargs`, `command`, `env`, and similar), assignments, dynamic text (variables, backticks, or substitutions), unquoted globs, `gh ... api`, `git config`, or text containing `*`.
+2. `Yes, and don't ask again for <rules> in this project` — for eligible Bash parts, save suggested or exact-command rules to the per-project file and apply them to the session. Exact `Bash(<part>)` rules match only that same parsed part; they are offered only for fully parsed static commands, not code runners or wrappers (`bash`, `python`, `npx`, `xargs`, `command`, `env`, and similar), package managers and build runners (`npm`, `pnpm`, `yarn`, `bun`, `deno`, `uv`, `make`, and `gradlew`, including a path-qualified `./gradlew`), assignments, dynamic text (variables, backticks, or substitutions), unquoted globs, `gh ... api`, `git config`, or text containing `*`.
 3. `Yes, and allow edits in <dir> during this session` — for an outside-project edit or output redirect in `acceptEdits`, add an in-memory `Edit(<dir>/**)` rule. The directory is the target worktree root (or target parent when outside Git); it is never saved and is not offered for `/`, the home directory, its ancestors, or when matching policy asks or denies.
 4. `Yes, allow all edits during this session` — for edits in `default` mode, switch this session to `acceptEdits`.
 5. `No, and tell pi what to do differently` — deny; optional text is included in the block reason.

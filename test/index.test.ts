@@ -297,3 +297,27 @@ test("permissions command describes, tests without running, and switches session
     assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" }), "");
   });
 });
+
+test("unattended job_run asks are blocked with the exact bash reason", async () => {
+  await withEnv({ NAKAMA_AGENT: "worker" }, async () => {
+    const { handlers, ctx, ui } = setup();
+    await handlers.get("session_start")!({}, ctx);
+    const result = await handlers.get("tool_call")!({ toolName: "job_run", input: { command: "git merge origin/develop" } }, ctx);
+    assert.deepEqual(result, {
+      block: true,
+      reason: "permission: `git merge origin/develop` needs approval (no allow rule). It was not run. Use a read-only alternative, or report that this step needs the orchestrator.",
+    });
+    assert.equal(ui.selectCalls.length, 0);
+  });
+});
+
+test("job_run follows the agent allow rules like bash", async () => {
+  await withEnv({}, async () => {
+    const { agent, handlers, ctx, ui } = setup();
+    mkdirSync(agent, { recursive: true });
+    writeFileSync(join(agent, "permissions.json"), JSON.stringify({ permissions: { allow: ["Bash(./gradlew *)"] } }));
+    await handlers.get("session_start")!({}, ctx);
+    assert.equal(await handlers.get("tool_call")!({ toolName: "job_run", input: { command: "./gradlew :x:test" } }, ctx), undefined);
+    assert.equal(ui.selectCalls.length, 0);
+  });
+});

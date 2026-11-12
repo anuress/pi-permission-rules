@@ -8,7 +8,7 @@ import { matchBash, matchPath, parseRule, type Rule, toolFamily } from "./rules.
 import { DANGEROUS_ASSIGNMENT, parse, type Part } from "./shell.ts";
 
 export type Call = { tool: string; command?: string; path?: string };
-export type Env = { root: string; cwd: string; mode: Mode; config: Config; session: Rule[]; git?: (args: string[], cwd: string) => string | null };
+export type Env = { root: string; cwd: string; mode: Mode; config: Config; session: Rule[]; agentDir: string; git?: (args: string[], cwd: string) => string | null };
 export type Flag = { label: string; rule: string; suggestion: string | null; reason?: "outside-project-root"; sessionGrantDirectory?: string };
 export type DecisionItem = {
   kind: "part" | "redirect" | "path" | "tool";
@@ -37,6 +37,11 @@ function physical(path: string): string {
 
 function inside(path: string, root: string): boolean {
   return root === "/" ? path.startsWith("/") : path === root || path.startsWith(`${root}/`);
+}
+
+function permissionFile(path: string, agentDir: string): boolean {
+  const directory = physical(agentDir);
+  return path === join(directory, "permissions.json") || inside(path, join(directory, "permissions"));
 }
 
 function normalizeToolPath(path: string, cwd: string): { path: string; outside: boolean } {
@@ -124,6 +129,9 @@ function evaluatePath(path: string, family: "Read" | "Edit", env: Env, outside =
   if (family === "Edit" && env.mode === "plan") return evaluated(kind, absolute, "deny", "plan mode");
   if (family === "Edit" && /(?:^|\/)\.git(?:\/|$)/.test(absolute)) {
     return evaluated(kind, absolute, "ask", "built-in .git protection");
+  }
+  if (family === "Edit" && permissionFile(absolute, env.agentDir)) {
+    return evaluated(kind, absolute, "ask", "built-in permission file protection");
   }
   const ask = pathRule(env.config.ask, family, absolute, root);
   if (ask) return evaluated(kind, absolute, "ask", ask.text);
@@ -377,11 +385,21 @@ export function decide(call: Call, env: Env): Decision {
     return choose([evaluatePath(normalized.path, family, env, normalized.outside)]);
   }
 
+  return decideCustom(call, env);
+}
+
+// A custom tool whose input carries a shell command, such as pi-jobs `job_run`,
+// is checked exactly like bash; a name-matching ask or deny rule still wins.
+function decideCustom(call: Call, env: Env): Decision {
   const deny = customRule(env.config.deny, call.tool);
   if (deny) return choose([evaluated("tool", call.tool, "deny", deny.text)]);
   const ask = customRule(env.config.ask, call.tool);
-  if (ask) return choose([evaluated("tool", call.tool, "ask", ask.text)]);
-  return choose([evaluated("tool", call.tool, "allow", "custom tool")]);
+  const bash = call.tool !== "powershell" && typeof call.command === "string" ? evaluateBash(call, env) : undefined;
+  if (ask === undefined) return bash ?? choose([evaluated("tool", call.tool, "allow", "custom tool")]);
+  const named = choose([evaluated("tool", call.tool, "ask", ask.text)]);
+  if (bash === undefined || bash.verdict === "allow") return named;
+  if (bash.verdict === "deny") return bash;
+  return { ...bash, flags: [named.flags[0], ...bash.flags], items: [...named.items, ...bash.items], reason: named.reason };
 }
 
 export function suggestExactRule(part: Part): string | null {
