@@ -928,3 +928,27 @@ test("brace expansion and variable rebinding cannot dodge the permission file ch
   verdict("bash", "allow", { command: "read name <<< x" });
   verdict("bash", "allow", { command: "cat ~/.pi/agent/{p,}ermissions.json" });
 });
+
+test("printf -v, mapfile and getopts targets are checked like read", () => {
+  const allowed = (tool: string) => env("default", { allow: rules(`Bash(${tool}:*)`) });
+  for (const [command, tool, name] of [
+    ["printf -v HOME x", "printf", "HOME"],
+    ["printf -vPATH x", "printf", "PATH"],
+    ["printf -v PI_CODING_AGENT_DIR x", "printf", "PI_CODING_AGENT_DIR"],
+    ["printf -v $n x", "printf", "$n"],
+    ["mapfile HOME < f", "mapfile", "HOME"],
+    ["mapfile -n 3 HOME < f", "mapfile", "HOME"],
+    ["mapfile -t HOME < f", "mapfile", "HOME"],
+    ["readarray -d '' HOME < f", "readarray", "HOME"],
+    ["getopts ab HOME", "getopts", "HOME"],
+  ] as const) {
+    assert.equal(verdict("bash", "ask", { command }, allowed(tool)).flags[0].rule, `dangerous env ${name}`, command);
+  }
+  // The bypass this closes: printf -v, then a write through the rebinding.
+  const both = env("default", { allow: rules("Bash(printf:*)", "Bash(cp:*)") });
+  verdict("bash", "ask", { command: "printf -v HOME /x/.pi/agent; cp /tmp/x $HOME/permissions.json" }, both);
+  // Harmless targets keep running.
+  verdict("bash", "allow", { command: "printf -v out x" }, allowed("printf"));
+  verdict("bash", "allow", { command: "mapfile out < f" }, allowed("mapfile"));
+  verdict("bash", "allow", { command: "getopts ab out" }, allowed("getopts"));
+});

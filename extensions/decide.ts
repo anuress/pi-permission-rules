@@ -25,6 +25,7 @@ type Evaluation = { verdict: Verdict; flag?: Flag; item: DecisionItem };
 
 const MODES: readonly Mode[] = ["default", "acceptEdits", "plan"];
 const READ_VALUE_OPTIONS = new Set(["-a", "-d", "-i", "-n", "-N", "-p", "-t", "-u"]);
+const MAPFILE_VALUE_OPTIONS = new Set(["-d", "-n", "-O", "-s", "-u", "-C", "-c"]);
 const READ_ARGUMENT_EXEMPT_COMMANDS = new Set(["echo", "printf", "read", "test", "[", "cd", "pwd", "basename", "dirname", "realpath", "true", "false", ":", "which"]);
 
 function physical(path: string): string {
@@ -187,9 +188,7 @@ function changesDir(argv: string[]): boolean {
 }
 
 // Names `read` assigns, including array targets; a dynamic name is not knowable.
-function readAssignment(part: Part): string | undefined {
-  const argv = unwrapWrappers(part.argv);
-  if (argv[0] !== "read") return undefined;
+function readNames(argv: string[]): string[] {
   const names: string[] = [];
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i];
@@ -209,7 +208,49 @@ function readAssignment(part: Part): string | undefined {
       break;
     }
   }
-  return names.find((name) => !name || /[$`]/.test(name) || DANGEROUS_ASSIGNMENT.test(name));
+  return names;
+}
+
+// The variable `printf -v` assigns: `-v NAME` or `-vNAME`.
+function printfName(argv: string[]): string | undefined {
+  for (let i = 1; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--" || !arg.startsWith("-") || arg === "-") return undefined;
+    if (arg === "-v") return argv[i + 1];
+    if (arg.startsWith("-v")) return arg.slice(2);
+  }
+  return undefined;
+}
+
+// The array operand of `mapfile`/`readarray`; d, n, O, s, u, C and c take a value.
+function mapfileName(argv: string[]): string | undefined {
+  let name: string | undefined;
+  for (let i = 1; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--") return argv.at(-1);
+    if (!arg.startsWith("-") || arg === "-") {
+      name = arg;
+      continue;
+    }
+    for (let j = 1; j < arg.length; j++) {
+      if (!MAPFILE_VALUE_OPTIONS.has(`-${arg[j]}`)) continue;
+      if (!arg.slice(j + 1)) i++;
+      break;
+    }
+  }
+  return name;
+}
+
+// A builtin that stores a value in a named variable makes that name as dangerous as an assignment.
+function assignmentTarget(part: Part): string | undefined {
+  const argv = unwrapWrappers(part.argv);
+  const names = argv[0] === "read" ? readNames(argv)
+    : argv[0] === "printf" ? [printfName(argv)]
+    : argv[0] === "mapfile" || argv[0] === "readarray" ? [mapfileName(argv)]
+    : argv[0] === "getopts" ? [argv[2]]
+    : [];
+  return names.find((name) => name !== undefined
+    && (!name || /[$`]/.test(name) || DANGEROUS_ASSIGNMENT.test(name)));
 }
 
 function hasReadRules(env: Env): boolean {
@@ -242,8 +283,8 @@ function evaluatePart(part: Part, env: Env): Evaluation {
 
   const unsafeAssignment = dangerousAssignment(part);
   if (unsafeAssignment) return evaluated("part", part.text, "ask", `dangerous env ${unsafeAssignment}`);
-  const readTarget = readAssignment(part);
-  if (readTarget) return evaluated("part", part.text, "ask", `dangerous env ${readTarget}`);
+  const assignmentName = assignmentTarget(part);
+  if (assignmentName) return evaluated("part", part.text, "ask", `dangerous env ${assignmentName}`);
   const allow = partRule(env.config.allow, part);
   if (allow) return evaluated("part", part.text, "allow", `allow rule ${allow.text}`);
   const session = partRule(env.session, part);
