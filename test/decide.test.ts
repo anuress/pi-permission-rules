@@ -847,3 +847,34 @@ test("permission files ask even with matching allow and session rules", () => {
   verdict("write", "deny", { path: join(agent, "permissions.json") }, env("plan"));
   verdict("bash", "deny", { command: `echo x > ${join(agent, "permissions.json")}` }, env("plan"));
 });
+
+test("permission file names are case-insensitive on a case-insensitive file system", { skip: process.platform !== "darwin" }, () => {
+  const allowAll = env("default", { allow: rules(`Edit(${agent}/**)`) });
+  for (const path of [join(agent, "PERMISSIONS.json"), join(agent, "Permissions", "a.json")]) {
+    const decision = verdict("write", "ask", { path }, allowAll);
+    assert.equal(decision.flags[0].rule, "built-in permission file protection", path);
+  }
+});
+
+test("write commands naming a permission file are checked like redirects", () => {
+  const file = join(agent, "permissions.json");
+  const nested = join(agent, "permissions", "x.json");
+  const cases: [string, string][] = [
+    [`cp foo.json ${file}`, "Bash(cp foo.json:*)"],
+    [`mv a ${nested}`, "Bash(mv a:*)"],
+    [`echo x | tee ${file}`, "Bash(tee:*)"],
+    [`dd if=a of=${file}`, "Bash(dd:*)"],
+  ];
+  for (const [command, rule] of cases) {
+    const decision = verdict("bash", "ask", { command }, env("default", { allow: rules(rule) }));
+    assert.ok(decision.items.some((item) => item.rule === "built-in permission file protection"), command);
+    assert.equal(verdict("job_run", "ask", { command }, env("default", { allow: rules(rule) })).verdict, "ask", command);
+  }
+  // A control: the same commands staying away from the permissions directory are allowed.
+  verdict("bash", "allow", { command: "cp foo.json notes.json" }, env("default", { allow: rules("Bash(cp foo.json:*)") }));
+  verdict("bash", "allow", { command: "dd if=a of=notes.json" }, env("default", { allow: rules("Bash(dd:*)") }));
+  // Reads are still allowed, and plan mode denies the write.
+  const read = verdict("bash", "allow", { command: `cat ${file}` });
+  assert.ok(read.items.every((item) => item.rule !== "built-in permission file protection"));
+  verdict("bash", "deny", { command: `cp foo.json ${file}` }, env("plan", { allow: rules("Bash(cp foo.json:*)") }));
+});

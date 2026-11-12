@@ -40,8 +40,11 @@ function inside(path: string, root: string): boolean {
 }
 
 function permissionFile(path: string, agentDir: string): boolean {
-  const directory = physical(agentDir);
-  return path === join(directory, "permissions.json") || inside(path, join(directory, "permissions"));
+  // APFS is case-insensitive and loadConfig opens permissions.json whatever its case.
+  const fold = (value: string) => process.platform === "darwin" ? value.toLowerCase() : value;
+  const directory = fold(physical(agentDir));
+  const target = fold(path);
+  return target === join(directory, "permissions.json") || inside(target, join(directory, "permissions"));
 }
 
 function normalizeToolPath(path: string, cwd: string): { path: string; outside: boolean } {
@@ -285,6 +288,25 @@ function cdDirectory(part: Part, dir: string | null): string | null {
   return physical(resolve(dir ?? "/", target));
 }
 
+// A write command such as `cp`, `tee` or `dd of=...` names its target as an argument,
+// so the redirect check never sees a write to a permission file.
+function permissionFileArguments(part: Part, dir: string | null, env: Env): Evaluation[] {
+  const verdict = env.mode === "plan" ? "deny" : "ask";
+  const evaluations: Evaluation[] = [];
+  for (const [index, word] of part.argv.slice(1).entries()) {
+    const words = [word];
+    if (word.includes("=")) words.push(word.slice(word.indexOf("=") + 1));
+    for (const candidate of words) {
+      const expanded = homePath(candidate);
+      if (!candidate || candidate.includes("$") || expanded === null || part.globs?.[index + 1]
+        || (dir === null && !isAbsolute(expanded))) continue;
+      const path = physical(resolve(dir ?? "/", expanded));
+      if (permissionFile(path, env.agentDir)) evaluations.push(evaluated("path", path, verdict, "built-in permission file protection"));
+    }
+  }
+  return evaluations;
+}
+
 function evaluateBash(call: Call, env: Env): Decision {
   const command = call.command ?? "";
   const parsed = parse(command);
@@ -330,6 +352,8 @@ function evaluateBash(call: Call, env: Env): Decision {
         evaluations.push(evaluatePath(physical(resolve(dir ?? "/", expanded)), "Read", { ...env, cwd: "/" }, false, "path"));
       }
     }
+    // A read-only part only reads, and plan mode already denies every other part.
+    if (!isReadOnly(part, env.config.readOnlyCommands, hasReadRules(env))) evaluations.push(...permissionFileArguments(part, dir, env));
     const readRulesPresent = hasReadRules(env);
     if (readRulesPresent && !READ_ARGUMENT_EXEMPT_COMMANDS.has(part.argv[0])
       && (isReadOnly(part, env.config.readOnlyCommands, readRulesPresent) || ["sed", "awk"].includes(part.argv[0]))) {
