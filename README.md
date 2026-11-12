@@ -45,7 +45,7 @@ The extension reads these files in order:
 | 2 | `~/.pi/agent/permissions/<repo-key>.json` (per project) | Yes: persistent “don't ask again” Bash grants | All supported settings |
 | 3 | `<project root>/.pi/permissions.json` (optional, team-shared) | Never | `permissions.ask` and `permissions.deny` only |
 
-In files 1 and 2, rules and `defaultMode` are under `permissions`; `readOnlyCommands`, `unattended`, and `askTimeoutSec` are top-level settings. Rule arrays are unioned, and file 2 overrides file 1 for scalar settings. The repo file can only tighten policy: its `allow`, `defaultMode`, `readOnlyCommands`, `unattended`, and `askTimeoutSec` settings are ignored and reported. A cloned repo cannot grant itself permission or turn off the gate.
+In files 1 and 2, rules and `defaultMode` are under `permissions`; `readOnlyCommands`, `unattended`, `askTimeoutSec` and `autoClassifierModel` are top-level settings. Rule arrays are unioned, and file 2 overrides file 1 for scalar settings. The repo file can only tighten policy: its `allow`, `defaultMode`, `readOnlyCommands`, `unattended`, `askTimeoutSec` and `autoClassifierModel` settings are ignored and reported. A cloned repo cannot grant itself permission or turn off the gate.
 
 Only the “don't ask again” choice writes a persistent grant, and it writes to file 2. The extension creates the directory as needed, writes via a temporary file and rename, and does not duplicate existing rules. Invalid JSON is reported and that file is skipped; malformed entries and ignored settings are also reported.
 
@@ -63,7 +63,8 @@ Example global or per-project settings:
   },
   "readOnlyCommands": ["fumi"],
   "unattended": "auto",
-  "askTimeoutSec": 60
+  "askTimeoutSec": 60,
+  "autoClassifierModel": "anthropic/claude-haiku-4-5"
 }
 ```
 
@@ -77,9 +78,26 @@ Mode precedence is `/permissions mode <mode>` for the current session, then `PI_
 |---|---|---|---|
 | `default` | Ask | Ask | Ask |
 | `acceptEdits` | Allow | Ask | Ask |
+| `auto` | Allow | Ask | Ask the auto-mode classifier |
 | `plan` | Deny | Deny | Deny unless every part is read-only |
 
 Read tools are allowed inside and outside the project root by default, subject to matching ask or deny rules. Explicit rules cannot make a non-read-only Bash part or edit allowed in `plan` mode.
+
+## Auto mode
+
+`auto` is `acceptEdits` plus a classifier for the asks. Edit and Bash allows, deny rules and the built-in `.git` and permission-file asks behave exactly as in `acceptEdits`; a deny never reaches the classifier. Every ask that reaches the gate becomes one model call:
+
+- **Allow** runs the call.
+- **Block** refuses it as ``permission: `<label>` was blocked by auto-mode classifier (<reason>). It was not run. Use a different approach, or report that this step needs the orchestrator.`` and counts one block for the circuit breaker.
+- **Failure** (no model, provider error, `stopReason` `error` or `aborted`, the 30 s timeout, an answer that is neither line) falls back to the normal prompt when attended, and to the normal unattended block when not.
+
+While `auto` is active, allow and session rules that hand a code runner the gate's own authority are ignored: a bare `Bash` rule, and a wildcard rule whose first word is a code runner (`bash`, `python`, `node`, `npm`, `pnpm`, `make`, `./gradlew`, `xargs`, …). So `Bash(npm run:*)` and `Bash(node --test:*)` do not apply in `auto`, while `Bash(npm run build)` and `Bash(git push:*)` still do. `/permissions` lists the ignored rules.
+
+The classifier sees only the user's messages and the agent's earlier tool calls (name and arguments), plus the pending call, capped at the last 40,000 characters. Assistant text, thinking and tool results are never sent, so text read from a file cannot instruct the classifier. It answers exactly `ALLOW` or `BLOCK: <one-line reason>`.
+
+After 3 consecutive or 20 total classifier blocks the session stops calling the classifier: an attended run falls back to the normal prompt, an unattended one blocks with ``permission: auto mode stopped calling the classifier after repeated blocks; `<label>` was not run. Stop and report to the orchestrator; do not try another route.`` A classifier allow resets the consecutive count.
+
+Set `autoClassifierModel` to `"provider/modelId"` to pick the classifier model; without it the session's own model (`ctx.model`) is used. It is read from files 1 and 2 only and reported as ignored in the repo file. The classifier runs on that provider's configured credentials, so it only works where the provider is set up; there is no extra dependency and no separate key.
 
 ## How Bash commands are checked
 
@@ -119,7 +137,7 @@ Only applicable choices are shown. Unattended asks remain blocked without openin
 
 ## Unattended mode
 
-`unattended` accepts `"auto"` (the default), `true`, or `false`. In `auto`, a call is unattended when pi has no UI, `PI_PERMISSIONS_UNATTENDED=1`, or `NAKAMA_AGENT` is set. No-UI sessions remain unattended even if the setting is `false`. An unattended ask does not open a prompt or save grants; it blocks the tool and gives the model a reason. Ask and deny reasons use this format:
+`unattended` accepts `"auto"` (the default), `true`, or `false`. In `auto`, a call is unattended when pi has no UI, `PI_PERMISSIONS_UNATTENDED=1`, or `NAKAMA_AGENT` is set. No-UI sessions remain unattended even if the setting is `false`. An unattended ask does not open a prompt or save grants; it blocks the tool and gives the model a reason. In `auto` mode an unattended ask goes to the classifier first and blocks only when it blocks it or fails (see [Auto mode](#auto-mode)). Ask and deny reasons use this format:
 
 ```text
 permission: `<part>` needs approval (<matched rule>). It was not run. Use a read-only alternative, or report that this step needs the orchestrator.
@@ -130,9 +148,9 @@ For an ask with no matching rule, the rule text is `no allow rule`; an explicit 
 
 ## `/permissions` commands
 
-- `/permissions` shows the project root, repo key, config sources, effective rules and their sources, ignored entries, mode, session grants, and unattended state.
+- `/permissions` shows the project root, repo key, config sources, effective rules and their sources, ignored entries, mode, the auto classifier model and its block counts, the rules auto mode ignores, session grants, and unattended state.
 - `/permissions test <command>` shows each parsed Bash part, redirect, and its decision without running it.
-- `/permissions mode <default|acceptEdits|plan>` changes the mode for this session.
+- `/permissions mode <default|acceptEdits|auto|plan>` changes the mode for this session.
 
 ## Deviations from Claude Code
 
@@ -141,6 +159,8 @@ For an ask with no matching rule, the rule text is `no allow rule`; an explicit 
 | Default mode `default` (edits ask) | Default `acceptEdits` | pi users and nakama builders edit freely today, and asking on every edit would be a big regression. nakama already launches Claude write workers in `acceptEdits`. Set `defaultMode: "default"` for strict behavior. |
 | Reads outside the working directory ask (`additionalDirectories`) | Always allowed | User decision 5: nakama researchers read sibling repos. |
 | Prefix suggested by a model call | Deterministic heuristic | No model call inside a permission hook: faster and testable. |
+| Auto mode: two-stage classifier (a second pass before risky actions) | One classifier pass, then a circuit breaker (3 consecutive / 20 total blocks) | One call per ask keeps the gate fast and testable; the breaker stops a looping session instead of escalating to a second model. |
+| Auto mode classifier runs on an Anthropic-hosted model | Runs on the session's configured model, or `autoClassifierModel` (`provider/modelId`) | No new dependency or credential: every pi provider already configured can classify. |
 | Unattended (`-p`): unapproved tools are refused | Same, plus `NAKAMA_AGENT`/env detection | pi's `hasUI` lies inside herdr panes. |
 | Settings in `.claude/settings*.json`; local grants in the repo's `.claude/settings.local.json` | `~/.pi/agent/permissions.json` + `~/.pi/agent/permissions/<repo-key>.json`; the repo file is read-only and limited to ask/deny | Decision 7: never write into a repo or worktree; per-project state must survive worktree deletion and be shared across worktrees. Claude settings are never read (decision 6). |
 | Project settings trusted after a workspace-trust prompt | No trust prompt; the repo file can only tighten | Smaller design with the same safety: a cloned repo can't loosen the gate. |

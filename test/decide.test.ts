@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { parseRule, type Rule } from "../extensions/rules.ts";
 import type { Config, Mode } from "../extensions/config.ts";
 import { parse } from "../extensions/shell.ts";
-import { decide, isUnattended, resolveMode, suggestExactRule, suggestRule, toBlock, type Env } from "../extensions/decide.ts";
+import { decide, droppedInAuto, isUnattended, resolveMode, suggestExactRule, suggestRule, toBlock, type Env } from "../extensions/decide.ts";
 
 const temp = mkdtempSync(join(tmpdir(), "ppr-"));
 const rootPath = join(temp, "repo");
@@ -269,6 +269,9 @@ test("resolveMode follows precedence and ignores invalid environment values with
   assert.deepEqual(resolveMode({}, config()), { mode: "acceptEdits" });
   assert.deepEqual(resolveMode({ PI_PERMISSIONS_MODE: "plan" }, cfg), { mode: "plan" });
   assert.deepEqual(resolveMode({ PI_PERMISSIONS_MODE: "plan" }, cfg, "acceptEdits"), { mode: "acceptEdits" });
+  assert.deepEqual(resolveMode({ PI_PERMISSIONS_MODE: "auto" }, cfg), { mode: "auto" });
+  assert.deepEqual(resolveMode({}, config({ defaultMode: "auto" })), { mode: "auto" });
+  assert.deepEqual(resolveMode({ PI_PERMISSIONS_MODE: "plan" }, cfg, "auto"), { mode: "auto" });
   const invalid = resolveMode({ PI_PERMISSIONS_MODE: "bogus" }, cfg);
   assert.equal(invalid.mode, "default");
   assert.match(invalid.warning ?? "", /bogus/);
@@ -951,4 +954,32 @@ test("printf -v, mapfile and getopts targets are checked like read", () => {
   verdict("bash", "allow", { command: "printf -v out x" }, allowed("printf"));
   verdict("bash", "allow", { command: "mapfile out < f" }, allowed("mapfile"));
   verdict("bash", "allow", { command: "getopts ab out" }, allowed("getopts"));
+});
+
+test("auto mode keeps the acceptEdits allows and asks", () => {
+  verdict("bash", "allow", { command: "git status" }, env("auto"));
+  verdict("write", "allow", { path: join(root, "src", "one.ts") }, env("auto"));
+  const outside = verdict("write", "ask", { path: join(temp, "outside.ts") }, env("auto"));
+  assert.equal(outside.flags[0].reason, "outside-project-root");
+  verdict("bash", "ask", { command: "echo x > /etc/hosts" }, env("auto"));
+  verdict("bash", "allow", { command: "git push" }, env("auto", { allow: rules("Bash(git push:*)") }));
+  verdict("bash", "deny", { command: "git push" }, env("auto", { deny: rules("Bash(git push:*)") }));
+});
+
+test("auto mode ignores wildcard code runner allow and session rules but keeps exact ones", () => {
+  const wildcard = { allow: rules("Bash(node --test:*)") };
+  verdict("bash", "allow", { command: "node --test test/" }, env("acceptEdits", wildcard));
+  verdict("bash", "ask", { command: "node --test test/" }, env("auto", wildcard));
+  const session: Rule[] = rules("Bash(python -c:*)");
+  assert.equal(decide({ tool: "bash", command: "python -c 'print(1)'" }, { ...env("acceptEdits"), session }).verdict, "allow");
+  assert.equal(decide({ tool: "bash", command: "python -c 'print(1)'" }, { ...env("auto"), session }).verdict, "ask");
+  verdict("bash", "allow", { command: "npm test" }, env("auto", { allow: rules("Bash(npm test)") }));
+  verdict("bash", "allow", { command: "npm run build" }, env("acceptEdits", { allow: rules("Bash(npm run:*)") }));
+  verdict("bash", "ask", { command: "npm run build" }, env("auto", { allow: rules("Bash(npm run:*)") }));
+  verdict("bash", "allow", { command: "npm run build" }, env("acceptEdits", { allow: rules("Bash") }));
+  verdict("bash", "ask", { command: "npm run build" }, env("auto", { allow: rules("Bash") }));
+  assert.equal(droppedInAuto(rules("Bash")[0], "auto"), true);
+  assert.equal(droppedInAuto(rules("Bash(./gradlew *)")[0], "auto"), true);
+  assert.equal(droppedInAuto(rules("Bash(node --test:*)")[0], "acceptEdits"), false);
+  assert.equal(droppedInAuto(rules("Bash(git push:*)")[0], "auto"), false);
 });

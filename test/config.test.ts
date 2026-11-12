@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { addGrant, loadConfig } from "../extensions/config.ts";
+import { addGrant, classifierModel, loadConfig } from "../extensions/config.ts";
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "ppr-"));
@@ -135,6 +135,41 @@ test("invalid fields are skipped with ignored reasons", () => {
       `${global}: unattended (invalid value)`,
       `${global}: askTimeoutSec (invalid value)`,
     ]);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("autoClassifierModel is loaded from the global and project files but ignored in the repo file", () => {
+  const temp = tempDir();
+  try {
+    const global = join(temp, "agent", "permissions.json");
+    const projectFile = join(temp, "agent", "permissions", "repo.json");
+    const repo = join(temp, "repo", ".pi", "permissions.json");
+    json(global, { permissions: { defaultMode: "auto" }, autoClassifierModel: "anthropic/claude-haiku-4-5" });
+    json(projectFile, { autoClassifierModel: "openrouter/anthropic/claude-3.5" });
+    json(repo, { autoClassifierModel: "repo/model" });
+
+    const config = loadConfig({ global, project: projectFile, repo });
+    assert.equal(config.defaultMode, "auto");
+    assert.equal(config.autoClassifierModel, "openrouter/anthropic/claude-3.5");
+    assert.deepEqual(classifierModel(config), { provider: "openrouter", modelId: "anthropic/claude-3.5" });
+    assert.deepEqual(config.ignored, [`${repo}: autoClassifierModel (repo file can only add ask/deny)`]);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("invalid autoClassifierModel values are reported and left unset", () => {
+  const temp = tempDir();
+  try {
+    const global = join(temp, "agent", "permissions.json");
+    for (const value of ["no-slash", 7, "/model", "provider/", ""]) {
+      json(global, { autoClassifierModel: value });
+      const config = loadConfig({ global, project: join(temp, "project.json"), repo: join(temp, "repo", ".pi", "permissions.json") });
+      assert.equal(config.autoClassifierModel, undefined, String(value));
+      assert.deepEqual(config.ignored, [`${global}: autoClassifierModel (invalid value, expected "provider/modelId")`]);
+    }
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }

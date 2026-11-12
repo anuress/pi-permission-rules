@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, explain, type PermissionState } from "../extensions/describe.ts";
 import { loadConfig } from "../extensions/config.ts";
+import { parseRule } from "../extensions/rules.ts";
 import { parse } from "../extensions/shell.ts";
 import { resolveMode } from "../extensions/decide.ts";
 import { keyFilename } from "../extensions/project.ts";
@@ -39,6 +40,30 @@ test("describe lists project, source status, ignored entries, mode origin and un
   assert.ok(output.includes(`Read(**/local.properties) [${repo}]`));
   assert.match(output, /plan.*PI_PERMISSIONS_MODE/);
   assert.match(output, /unattended:\s*yes/i);
+});
+
+test("describe reports the auto classifier, its block counts and the rules auto mode ignores", () => {
+  const temp = mkdtempSync(join(tmpdir(), "ppr-describe-auto-"));
+  const root = join(temp, "repo");
+  mkdirSync(root);
+  const global = join(temp, "global.json");
+  writeFileSync(global, JSON.stringify({
+    permissions: { allow: ["Bash(node --test:*)", "Bash(npm test)"], defaultMode: "auto" },
+    autoClassifierModel: "p/m",
+  }));
+  const config = loadConfig({ global, project: join(temp, "project.json"), repo: join(root, ".pi", "permissions.json") });
+  const session = [parseRule("Bash(python -c:*)")!];
+  const state: PermissionState = {
+    project: { root, key: root }, config, cwd: root, projectFile: join(temp, "project.json"), session,
+    sessionMode: undefined, processEnv: {}, hasUI: true, auto: { consecutive: 3, total: 5 },
+  };
+  const output = describe(state);
+
+  assert.match(output, /Mode: auto/);
+  assert.match(output, /Auto classifier: p\/m/);
+  assert.match(output, /Auto classifier blocks: 3 consecutive, 5 total \(classifier stopped for this session\)/);
+  assert.match(output, /Ignored in auto mode: Bash\(node --test:\*\), Bash\(python -c:\*\)/);
+  assert.doesNotMatch(output, /Ignored in auto mode:.*Bash\(npm test\)/);
 });
 
 test("explain gives a verdict and matching rule for each shell part", () => {

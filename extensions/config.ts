@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "
 import { dirname } from "node:path";
 import { parseRule, type Rule } from "./rules.ts";
 
-export type Mode = "default" | "acceptEdits" | "plan";
+export type Mode = "default" | "acceptEdits" | "auto" | "plan";
 export type Config = {
   allow: Rule[];
   ask: Rule[];
@@ -12,13 +12,14 @@ export type Config = {
   readOnlyCommands: string[];
   unattended: "auto" | boolean;
   askTimeoutSec?: number;
+  autoClassifierModel?: string;
   sources: { path: string; loaded: boolean; error?: string }[];
   ignored: string[];
 };
 
 type JsonObject = Record<string, unknown>;
 type LoadedSource = { path: string; loaded: boolean; error?: string; value?: JsonObject; nonObject?: boolean };
-const MODES: Mode[] = ["default", "acceptEdits", "plan"];
+const MODES: Mode[] = ["default", "acceptEdits", "auto", "plan"];
 const own = (value: JsonObject, key: string): boolean => Object.prototype.hasOwnProperty.call(value, key);
 const isObject = (value: unknown): value is JsonObject => value !== null && typeof value === "object" && !Array.isArray(value);
 
@@ -121,7 +122,7 @@ export function loadConfig(paths: { global: string; project: string; repo: strin
     }
 
     if (isRepo) {
-      for (const field of ["readOnlyCommands", "unattended", "askTimeoutSec"] as const) {
+      for (const field of ["readOnlyCommands", "unattended", "askTimeoutSec", "autoClassifierModel"] as const) {
         if (own(value, field)) ignored.push(`${source.path}: ${field} (repo file can only add ask/deny)`);
       }
       return;
@@ -139,9 +140,21 @@ export function loadConfig(paths: { global: string; project: string; repo: strin
         ignored.push(`${source.path}: askTimeoutSec (invalid value)`);
       }
     }
+    if (own(value, "autoClassifierModel")) {
+      const model = value.autoClassifierModel;
+      if (typeof model === "string" && /^[^\s/]+\/\S+$/.test(model)) config.autoClassifierModel = model;
+      else ignored.push(`${source.path}: autoClassifierModel (invalid value, expected "provider/modelId")`);
+    }
   });
 
   return config;
+}
+
+// `autoClassifierModel` is `provider/modelId`, split for `modelRegistry.find`.
+export function classifierModel(config: Config): { provider: string; modelId: string } | undefined {
+  if (config.autoClassifierModel === undefined) return undefined;
+  const slash = config.autoClassifierModel.indexOf("/");
+  return { provider: config.autoClassifierModel.slice(0, slash), modelId: config.autoClassifierModel.slice(slash + 1) };
 }
 
 export function addGrant(projectFile: string, rules: string[]): void {

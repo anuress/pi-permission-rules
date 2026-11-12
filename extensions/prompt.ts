@@ -43,7 +43,7 @@ export async function ask(ui: Ui, call: Call, d: Decision, mode: Mode, timeoutSe
   const outsidePathAsk = family === "Edit" && outsideItems.length > 0 && outsideItems.every((item) => item.kind === "path")
     || family === "Bash" && outsideItems.length > 0 && outsideItems.every((item) => item.kind === "redirect");
   const outsideDirectories = [...new Set(outsideItems.map((item) => item.sessionGrantDirectory))];
-  const outsideSessionDirectory = mode === "acceptEdits" && outsidePathAsk && d.flags.length > 0
+  const outsideSessionDirectory = (mode === "acceptEdits" || mode === "auto") && outsidePathAsk && d.flags.length > 0
     && d.flags.every((flag) => flag.reason === "outside-project-root" && flag.sessionGrantDirectory !== undefined)
     && outsideItems.every((item) => item.reason === "outside-project-root" && item.sessionGrantDirectory !== undefined)
     && outsideDirectories.length === 1 ? outsideDirectories[0] : undefined;

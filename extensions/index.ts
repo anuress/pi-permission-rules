@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { breakerTripped, classify, type ClassifierContext } from "./classifier.ts";
 import { addGrant, loadConfig, type Mode } from "./config.ts";
 import { describe, explain, type PermissionState } from "./describe.ts";
 import { decide, isUnattended, resolveMode, toBlock, type Call, type Decision, type Env } from "./decide.ts";
@@ -8,7 +9,7 @@ import { agentDir, keyFilename, resolveProject, type Git } from "./project.ts";
 import { ask, type Ui } from "./prompt.ts";
 import { parseRule } from "./rules.ts";
 
-type Context = {
+type Context = ClassifierContext & {
   cwd: string;
   hasUI: boolean;
   ui: Ui & { notify(message: string, level: "info" | "warning" | "error"): void };
@@ -33,7 +34,7 @@ function createState(ctx: Context, processEnv: NodeJS.ProcessEnv): PermissionSta
     project: projectFile,
     repo: join(project.root, ".pi", "permissions.json"),
   });
-  return { project, config, cwd: ctx.cwd, projectFile, session: [], processEnv, hasUI: ctx.hasUI };
+  return { project, config, cwd: ctx.cwd, projectFile, session: [], processEnv, hasUI: ctx.hasUI, auto: { consecutive: 0, total: 0 } };
 }
 
 function currentEnv(state: PermissionState, cwd: string): Env {
@@ -52,6 +53,10 @@ function notifyStartup(state: PermissionState, ctx: Context): void {
 
 function failClosed(error: unknown): { block: true; reason: string } {
   return { block: true, reason: `permission check failed: ${error instanceof Error ? error.message : String(error)}` };
+}
+
+function breakerReason(label: string): string {
+  return `permission: auto mode stopped calling the classifier after repeated blocks; \`${label}\` was not run. Stop and report to the orchestrator; do not try another route.`;
 }
 
 function syntheticDecision(verdict: "ask" | "deny", label: string, rule: string): Decision {
@@ -104,7 +109,31 @@ export default function (pi: ExtensionAPI): void {
       }
 
       if (decision.verdict === "allow") return undefined;
-      if (decision.verdict === "deny" || isUnattended(state.config.unattended, ctx.hasUI, processEnv)) return toBlock(decision);
+      if (decision.verdict === "deny") return toBlock(decision);
+
+      const unattended = isUnattended(state.config.unattended, ctx.hasUI, processEnv);
+      const label = decision.flags[0]?.label ?? call.tool;
+      if (env.mode === "auto") {
+        const blocks = state.auto ??= { consecutive: 0, total: 0 };
+        if (breakerTripped(blocks)) {
+          if (unattended) return { block: true, reason: breakerReason(label) };
+        } else {
+          const verdict = await classify(ctx, state.config, call);
+          if (verdict?.allow) {
+            blocks.consecutive = 0;
+            return undefined;
+          }
+          if (verdict) {
+            blocks.consecutive++;
+            blocks.total++;
+            return {
+              block: true,
+              reason: `permission: \`${label}\` was blocked by auto-mode classifier (${verdict.reason}). It was not run. Use a different approach, or report that this step needs the orchestrator.`,
+            };
+          }
+        }
+      }
+      if (unattended) return toBlock(decision);
 
       const outcome = await ask(ctx.ui, call, decision, env.mode, state.config.askTimeoutSec);
       if (!outcome.allow) return { block: true, reason: outcome.reason };
@@ -153,15 +182,15 @@ export default function (pi: ExtensionAPI): void {
         const modeMatch = /^mode\s+(\S+)$/i.exec(input);
         if (modeMatch) {
           const mode = modeMatch[1] as Mode;
-          if (["default", "acceptEdits", "plan"].includes(mode)) {
+          if (["default", "acceptEdits", "auto", "plan"].includes(mode)) {
             state.sessionMode = mode;
             ctx.ui.notify(`Permission mode set to ${mode} for this session.`, "info");
           } else {
-            ctx.ui.notify(`Invalid mode "${mode}". Valid modes: default, acceptEdits, plan.`, "error");
+            ctx.ui.notify(`Invalid mode "${mode}". Valid modes: default, acceptEdits, auto, plan.`, "error");
           }
           return;
         }
-        ctx.ui.notify("Usage: /permissions [test <command> | mode <default|acceptEdits|plan>]", "info");
+        ctx.ui.notify("Usage: /permissions [test <command> | mode <default|acceptEdits|auto|plan>]", "info");
       } catch (error) {
         ctx.ui.notify(`Permission command failed: ${error instanceof Error ? error.message : String(error)}`, "error");
       }

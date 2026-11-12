@@ -23,7 +23,7 @@ export type Decision = { verdict: "allow" | "ask" | "deny"; flags: Flag[]; reaso
 type Verdict = Decision["verdict"];
 type Evaluation = { verdict: Verdict; flag?: Flag; item: DecisionItem };
 
-const MODES: readonly Mode[] = ["default", "acceptEdits", "plan"];
+const MODES: readonly Mode[] = ["default", "acceptEdits", "auto", "plan"];
 const READ_VALUE_OPTIONS = new Set(["-a", "-d", "-i", "-n", "-N", "-p", "-t", "-u"]);
 const MAPFILE_VALUE_OPTIONS = new Set(["-d", "-n", "-O", "-s", "-u", "-C", "-c"]);
 const READ_ARGUMENT_EXEMPT_COMMANDS = new Set(["echo", "printf", "read", "test", "[", "cd", "pwd", "basename", "dirname", "realpath", "true", "false", ":", "which"]);
@@ -60,6 +60,19 @@ function normalizeToolPath(path: string, cwd: string): { path: string; outside: 
 
 function partRule(rules: readonly Rule[], part: Part): Rule | undefined {
   return rules.find((rule) => matchBash(rule, part));
+}
+
+// An allow or session rule that matches every invocation of a code runner gives that runner the
+// gate's own authority, so auto mode ignores it. Exact rules and named-command wildcards stay.
+export function droppedInAuto(rule: Rule, mode: Mode): boolean {
+  if (mode !== "auto" || rule.tool !== "Bash") return false;
+  if (rule.pattern === undefined) return true;
+  if (!rule.pattern.includes("*")) return false;
+  return CODE_RUNNERS.has(basename(rule.pattern.split(/\s+/)[0] ?? ""));
+}
+
+function allowRulesInMode(rules: readonly Rule[], mode: Mode): readonly Rule[] {
+  return rules.filter((rule) => !droppedInAuto(rule, mode));
 }
 
 function pathRule(rules: readonly Rule[], family: "Read" | "Edit", path: string, root: string): Rule | undefined {
@@ -145,10 +158,12 @@ function evaluatePath(path: string, family: "Read" | "Edit", env: Env, outside =
   if (allow) return evaluated(kind, absolute, "allow", `allow rule ${allow.text}`);
   const session = pathRule(env.session, family, absolute, root);
   if (session) return evaluated(kind, absolute, "allow", `session rule ${session.text}`);
-  if (env.mode === "acceptEdits" && !outside && inside(absolute, root)) {
+  // Auto mode inherits every acceptEdits allow, including the outside-root session grant.
+  const editsAllowed = env.mode === "acceptEdits" || env.mode === "auto";
+  if (editsAllowed && !outside && inside(absolute, root)) {
     return evaluated(kind, absolute, "allow", "inside project root");
   }
-  const metadata = family === "Edit" && env.mode === "acceptEdits" && !outside && !inside(absolute, root)
+  const metadata = family === "Edit" && editsAllowed && !outside && !inside(absolute, root)
     ? { reason: "outside-project-root" as const, sessionGrantDirectory: outsideGrantDirectory(absolute, env) }
     : {};
   return evaluated(kind, absolute, "ask", "no allow rule", null, metadata);
@@ -285,9 +300,9 @@ function evaluatePart(part: Part, env: Env): Evaluation {
   if (unsafeAssignment) return evaluated("part", part.text, "ask", `dangerous env ${unsafeAssignment}`);
   const assignmentName = assignmentTarget(part);
   if (assignmentName) return evaluated("part", part.text, "ask", `dangerous env ${assignmentName}`);
-  const allow = partRule(env.config.allow, part);
+  const allow = partRule(allowRulesInMode(env.config.allow, env.mode), part);
   if (allow) return evaluated("part", part.text, "allow", `allow rule ${allow.text}`);
-  const session = partRule(env.session, part);
+  const session = partRule(allowRulesInMode(env.session, env.mode), part);
   if (session) return evaluated("part", part.text, "allow", `session rule ${session.text}`);
   if (isReadOnly(part, env.config.readOnlyCommands, hasReadRules(env))) return evaluated("part", part.text, "allow", "read-only");
   return evaluated("part", part.text, "ask", "no allow rule", suggestRule(part));

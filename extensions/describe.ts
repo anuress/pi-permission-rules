@@ -1,5 +1,6 @@
 import { keyFilename } from "./project.ts";
-import { decide, isUnattended, resolveMode, type Env } from "./decide.ts";
+import { breakerTripped } from "./classifier.ts";
+import { decide, droppedInAuto, isUnattended, resolveMode, type Env } from "./decide.ts";
 import type { Config, Mode } from "./config.ts";
 import type { Project } from "./project.ts";
 import type { Rule } from "./rules.ts";
@@ -13,18 +14,21 @@ export type PermissionState = {
   sessionMode?: Mode;
   processEnv: NodeJS.ProcessEnv;
   hasUI: boolean;
+  auto?: { consecutive: number; total: number };
 };
 
 function origin(state: PermissionState): string {
   if (state.sessionMode) return "session";
   const requested = state.processEnv.PI_PERMISSIONS_MODE;
-  if (requested === "default" || requested === "acceptEdits" || requested === "plan") return "env PI_PERMISSIONS_MODE";
+  if (requested === "default" || requested === "acceptEdits" || requested === "auto" || requested === "plan") return "env PI_PERMISSIONS_MODE";
   if (state.config.defaultMode) return "config";
   return "default";
 }
 
 export function describe(state: PermissionState): string {
   const mode = resolveMode(state.processEnv, state.config, state.sessionMode);
+  const auto = state.auto ?? { consecutive: 0, total: 0 };
+  const dropped = [...state.config.allow, ...state.session].filter((rule) => droppedInAuto(rule, mode.mode));
   const sources = state.config.sources.map((source) =>
     `  ${source.path}: ${source.error ? `error: ${source.error}` : source.loaded ? "loaded" : "missing"}`,
   );
@@ -45,6 +49,9 @@ export function describe(state: PermissionState): string {
       `  ${kind}: ${state.config[kind].map((rule) => `${rule.text} [${state.config.ruleSources.get(rule) ?? "unknown source"}]`).join(", ") || "none"}`,
     ),
     `Mode: ${mode.mode} (origin: ${origin(state)})`,
+    `Auto classifier: ${state.config.autoClassifierModel ?? "session model"}`,
+    `Auto classifier blocks: ${auto.consecutive} consecutive, ${auto.total} total${breakerTripped(auto) ? " (classifier stopped for this session)" : ""}`,
+    ...(mode.mode === "auto" ? [`Ignored in auto mode: ${dropped.map((rule) => rule.text).join(", ") || "none"}`] : []),
     `Unattended: ${isUnattended(state.config.unattended, state.hasUI, state.processEnv) ? "yes" : "no"}`,
     `Session grants: ${state.session.length}${state.session.length ? ` (${state.session.map((rule) => rule.text).join(", ")})` : ""}`,
   ].join("\n");
