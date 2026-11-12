@@ -258,6 +258,16 @@ function homePath(path: string): string | null {
   return path.startsWith("~") ? null : path;
 }
 
+// Only a leading $HOME or $PI_CODING_AGENT_DIR is expandable; a word with any other
+// expansion stays unresolved.
+function expandKnownVariables(word: string, env: Env): string {
+  const match = /^\$(?:\{(HOME|PI_CODING_AGENT_DIR)\}|(HOME|PI_CODING_AGENT_DIR))(?=$|\/)/.exec(word);
+  if (!match) return word;
+  const rest = word.slice(match[0].length);
+  if (rest.includes("$") || rest.includes("`")) return word;
+  return `${(match[1] ?? match[2]) === "HOME" ? homedir() : env.agentDir}${rest}`;
+}
+
 function redirectPath(target: string, dir: string | null, glob = false): { path: string; outside: boolean } {
   if (glob || target.includes("$")) return { path: resolve(dir ?? "/", target), outside: true };
   const expanded = homePath(target);
@@ -268,7 +278,7 @@ function redirectPath(target: string, dir: string | null, glob = false): { path:
     : { path: physical(resolve(dir, target)), outside: false };
 }
 
-function cdDirectory(part: Part, dir: string | null): string | null {
+function cdDirectory(part: Part, dir: string | null, env: Env): string | null {
   // Only a bare `cd` surely runs in this shell; a wrapped one leaves the directory unknown.
   if (part.argv[0] !== "cd") return null;
   const args = part.argv.slice(1);
@@ -282,8 +292,10 @@ function cdDirectory(part: Part, dir: string | null): string | null {
     index++;
   }
   const targets = args.slice(index);
-  if (targets.length !== 1 || targets[0] === "-" || targets[0].includes("$") || part.globs[index + 1]) return null;
-  const target = homePath(targets[0]);
+  if (targets.length !== 1 || targets[0] === "-" || part.globs[index + 1]) return null;
+  const word = expandKnownVariables(targets[0], env);
+  if (word.includes("$") || word.includes("`")) return null;
+  const target = homePath(word);
   if (target === null || (dir === null && !isAbsolute(target))) return null;
   return physical(resolve(dir ?? "/", target));
 }
@@ -293,15 +305,24 @@ function cdDirectory(part: Part, dir: string | null): string | null {
 function permissionFileArguments(part: Part, dir: string | null, env: Env): Evaluation[] {
   const verdict = env.mode === "plan" ? "deny" : "ask";
   const evaluations: Evaluation[] = [];
+  const add = (label: string) => evaluations.push(evaluated("path", label, verdict, "built-in permission file protection"));
   for (const [index, word] of part.argv.slice(1).entries()) {
     const words = [word];
     if (word.includes("=")) words.push(word.slice(word.indexOf("=") + 1));
+    if (word.startsWith("-") && !word.startsWith("--") && word.length > 2) words.push(word.slice(2));
     for (const candidate of words) {
-      const expanded = homePath(candidate);
-      if (!candidate || candidate.includes("$") || expanded === null || part.globs?.[index + 1]
-        || (dir === null && !isAbsolute(expanded))) continue;
+      const known = expandKnownVariables(candidate, env);
+      const expanded = homePath(known);
+      if (known.includes("$") || known.includes("`") || expanded === null
+        || part.globs?.[index + 1] || (dir === null && !isAbsolute(expanded))) {
+        // ponytail: an unresolved operand can only name the file through another variable or a
+        // glob, so this keeps allowed shapes such as `-Pv=$X` quiet; the upgrade is asking on
+        // every unresolved write operand.
+        if (/[*?\[]/.test(candidate) || candidate.toLowerCase().includes("perm")) add(candidate);
+        continue;
+      }
       const path = physical(resolve(dir ?? "/", expanded));
-      if (permissionFile(path, env.agentDir)) evaluations.push(evaluated("path", path, verdict, "built-in permission file protection"));
+      if (permissionFile(path, env.agentDir)) add(path);
     }
   }
   return evaluations;
@@ -380,7 +401,7 @@ function evaluateBash(call: Call, env: Env): Decision {
     const argv = part.argv;
     if (changesDir(argv)) {
       // A second cd, one in a body that may not run, or a wrapped cd leaves the directory unknown.
-      if (argv[0] === "cd" && !seenCd.get(part.scope) && !part.conditional) dirs.set(part.scope, cdDirectory(part, dir));
+      if (argv[0] === "cd" && !seenCd.get(part.scope) && !part.conditional) dirs.set(part.scope, cdDirectory(part, dir, env));
       else dirs.set(part.scope, null);
       seenCd.set(part.scope, true);
     }

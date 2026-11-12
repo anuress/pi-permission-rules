@@ -878,3 +878,29 @@ test("write commands naming a permission file are checked like redirects", () =>
   assert.ok(read.items.every((item) => item.rule !== "built-in permission file protection"));
   verdict("bash", "deny", { command: `cp foo.json ${file}` }, env("plan", { allow: rules("Bash(cp foo.json:*)") }));
 });
+
+test("unresolved and attached operands cannot name a permission file", () => {
+  const cp = env("default", { allow: rules("Bash(cp:*)") });
+  const home = { ...cp, agentDir: join(homedir(), ".pi", "agent") };
+  const cases: [string, Env][] = [
+    ["cp /tmp/x $HOME/.pi/agent/permissions.json", home],
+    ["cd $HOME/.pi/agent && cp /tmp/x permissions.json", home],
+    ["cp /tmp/x $PI_CODING_AGENT_DIR/permissions.json", cp],
+    ["cp /tmp/x ~/.pi/agent/perm*", cp],
+    [`cp -t${join(agent, "permissions")} /tmp/x`, cp],
+  ];
+  for (const [command, state] of cases) {
+    const decision = verdict("bash", "ask", { command }, state);
+    assert.ok(decision.items.some((item) => item.rule === "built-in permission file protection"), command);
+  }
+  // Expanding the two known variables resolves the operand instead of skipping it.
+  const protection = (decision: { items: { rule: string; label: string }[] }) => decision.items.find((item) => item.rule === "built-in permission file protection");
+  assert.equal(protection(verdict("bash", "ask", { command: "cp /tmp/x $PI_CODING_AGENT_DIR/permissions.json" }, cp))?.label, join(agent, "permissions.json"));
+  assert.equal(protection(verdict("bash", "ask", { command: "cd $PI_CODING_AGENT_DIR && cp /tmp/x permissions.json" }, cp))?.label, join(agent, "permissions.json"));
+  assert.ok(!protection(verdict("bash", "ask", { command: "cp /tmp/x $HOME/.pi/agent/permissions.json" }, home))!.label.includes("$"));
+  // Ordinary unresolved operands stay allowed, so granted commands keep working.
+  verdict("bash", "allow", { command: "cp /tmp/a $HOME/notes.txt" }, cp);
+  verdict("bash", "allow", { command: "cp /tmp/a $OUT/x.txt" }, cp);
+  verdict("bash", "allow", { command: "./gradlew -Pv=$X" }, env("default", { allow: rules("Bash(./gradlew *)") }));
+  verdict("bash", "deny", { command: "cp /tmp/x $PI_CODING_AGENT_DIR/permissions.json" }, env("plan", { allow: rules("Bash(cp:*)") }));
+});
