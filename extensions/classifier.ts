@@ -68,7 +68,8 @@ function describeCall(tool: string, input: unknown): string {
   } catch {
     rendered = String(input);
   }
-  const text = `Tool: ${tool}\nArguments: ${rendered}`;
+  // The name is JSON-escaped too, so a name carrying newlines cannot forge a `User message:` line.
+  const text = `Tool: ${JSON.stringify(tool)}\nArguments: ${rendered}`;
   return text.length > CALL_LIMIT ? `${text.slice(0, CALL_LIMIT)}…[truncated]` : text;
 }
 
@@ -143,8 +144,8 @@ export async function classify(ctx: ClassifierContext, config: Config, pending: 
     if (!reply || reply.stopReason === "error" || reply.stopReason === "aborted") return null;
     const answer = textOf(reply.content).trim();
     if (answer === "" || answer.includes("\n")) return null;
-    if (/^ALLOW$/i.test(answer)) return { allow: true };
-    const blocked = /^BLOCK:\s*(\S.*)$/i.exec(answer);
+    if (/^ALLOW$/.test(answer)) return { allow: true };
+    const blocked = /^BLOCK:\s*(\S.*)$/.exec(answer);
     return blocked ? { allow: false, reason: blocked[1].trim() } : null;
   } catch {
     return null;

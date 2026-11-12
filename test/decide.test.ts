@@ -989,6 +989,19 @@ test("auto mode ignores wildcard code runner allow and session rules but keeps e
     assert.equal(droppedInAuto(rules(text)[0], "auto"), false, text);
   }
   verdict("bash", "ask", { command: "node --version" }, env("auto", { allow: rules("Bash(*)", "Bash(node:*)", "Bash(* --version)") }));
+  // A wildcard over a wrapper names the runner: npx/find directly, command and timeout behind a word.
+  for (const [text, command] of [
+    ["Bash(npx:*)", "npx eslint ."],
+    ["Bash(find:*)", "find . -exec rm {} ;"],
+    ["Bash(command node:*)", "command node build.js"],
+    ["Bash(timeout 60 python:*)", "timeout 60 python x.py"],
+  ] as const) {
+    assert.equal(droppedInAuto(rules(text)[0], "auto"), true, text);
+    verdict("bash", "allow", { command }, env("acceptEdits", { allow: rules(text) }));
+    verdict("bash", "ask", { command }, env("auto", { allow: rules(text) }));
+  }
+  assert.equal(droppedInAuto(rules("Bash(git status:*)")[0], "auto"), false);
+  verdict("bash", "allow", { command: "npx tsc --version" }, env("auto", { allow: rules("Bash(npx tsc --version)") }));
   verdict("bash", "allow", { command: "node --version" }, env("acceptEdits", { allow: rules("Bash(node:*)") }));
   verdict("bash", "allow", { command: "node --version" }, env("auto", { allow: rules("Bash(node --version)") }));
 });

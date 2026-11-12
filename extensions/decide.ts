@@ -62,6 +62,13 @@ function partRule(rules: readonly Rule[], part: Part): Rule | undefined {
   return rules.find((rule) => matchBash(rule, part));
 }
 
+// Every word that runs code named in a rule: the code runners plus the wrappers that forward to
+// them (`command node:*`) and the tools that take a program or script (`sed`, `find`, `awk`).
+export const RUNNER_WORDS: ReadonlySet<string> = new Set([
+  ...CODE_RUNNERS,
+  "command", "nohup", "time", "nice", "timeout", "builtin", "npx", "awk", "gawk", "sed", "find", "exec", "source", ".",
+]);
+
 // An allow or session rule that matches every invocation of a code runner gives that runner the
 // gate's own authority, so auto mode ignores it. Exact rules and named-command wildcards stay.
 export function droppedInAuto(rule: Rule, mode: Mode): boolean {
@@ -69,9 +76,12 @@ export function droppedInAuto(rule: Rule, mode: Mode): boolean {
   if (rule.pattern === undefined) return true;
   if (!rule.pattern.includes("*")) return false;
   // The `:*` suffix is the prefix wildcard, so `node:*` names `node`, not a wildcard word.
-  const first = (rule.pattern.split(/\s+/)[0] ?? "").replace(/:\*$/, "");
-  if (first.includes("*")) return true;
-  return CODE_RUNNERS.has(basename(first));
+  const words = rule.pattern.split(/\s+/).map((word) => word.replace(/:\*$/, ""));
+  if (words[0]?.includes("*")) return true;
+  // A wildcard over a wrapper names the runner later in the rule: `Bash(timeout 60 python:*)`.
+  const wildcard = words.findIndex((word) => word.includes("*"));
+  const leading = wildcard < 0 ? words : words.slice(0, wildcard);
+  return leading.some((word) => RUNNER_WORDS.has(basename(word)));
 }
 
 function allowRulesInMode(rules: readonly Rule[], mode: Mode): readonly Rule[] {
@@ -510,8 +520,7 @@ export function suggestExactRule(part: Part): string | null {
   if (!part.argv.length || part.assignments.length > 0 || !part.text || part.text.includes("*")
     || part.text.includes("$") || part.text.includes("`") || part.globs?.some(Boolean) || part.dynamic?.some(Boolean)) return null;
   const executable = part.argv[0].slice(part.argv[0].lastIndexOf("/") + 1);
-  if (CODE_RUNNERS.has(executable)
-    || ["command", "nohup", "time", "nice", "timeout", "builtin", "npx", "awk", "gawk", "sed", "find", "exec", "source", "."].includes(executable)
+  if (RUNNER_WORDS.has(executable)
     || (executable === "gh" && part.argv.includes("api"))
     || (executable === "git" && part.argv.slice(1).includes("config"))) return null;
   const text = `Bash(${part.text})`;
@@ -522,7 +531,7 @@ export function suggestRule(part: Part): string | null {
   if (!part.argv.length || part.assignments.length > 0 || part.text.includes("*")) return null;
   const first = part.argv[0];
   const executable = first.slice(first.lastIndexOf("/") + 1);
-  if (CODE_RUNNERS.has(executable) || ["for", "select", "case", "while", "until", "if", "function", "time", "{", "(", "!", "read", "command", "nohup", "nice", "timeout", "builtin", "awk", "gawk", "sed", "find", "npx"].includes(executable)
+  if (RUNNER_WORDS.has(executable) || ["for", "select", "case", "while", "until", "if", "function", "{", "(", "!", "read"].includes(executable)
     || (executable === "gh" && part.argv.includes("api"))
     || (["gh", "git"].includes(executable) && part.argv[1]?.startsWith("-"))) return null;
   const second = part.argv[1];

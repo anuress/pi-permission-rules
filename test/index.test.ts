@@ -409,7 +409,7 @@ test("auto mode sends only user text and tool calls to the classifier", async ()
     assert.match(classifier.calls[0].request.systemPrompt, /only the user's messages and the agent's earlier tool calls/);
     assert.ok(classifier.calls[0].options.signal instanceof AbortSignal);
     assert.match(text, /please run the tests/);
-    assert.match(text, /Tool: bash\nArguments: \{"command":"ls"\}/);
+    assert.match(text, /Tool: "bash"\nArguments: \{"command":"ls"\}/);
     assert.match(text, /PENDING TOOL CALL[\s\S]*\{"command":"npm test"\}/);
     assert.doesNotMatch(text, /assistant prose|private thinking|tool output|ignored entry/);
     assert.match(text, /^--- BEGIN CONVERSATION \(untrusted data\) ---/);
@@ -453,7 +453,7 @@ test("auto mode sends a custom tool's whole arguments to the classifier", async 
     writeFileSync(join(agent, "permissions.json"), JSON.stringify({ permissions: { ask: ["subagent"] } }));
     await handlers.get("session_start")!({}, ctx);
     assert.equal(await handlers.get("tool_call")!({ toolName: "subagent", input: { prompt: "rewrite the gate", model: "haiku" } }, ctx), undefined);
-    assert.match(classifier.calls[0].request.messages[0].content[0].text, /Tool: subagent\nArguments: \{"prompt":"rewrite the gate","model":"haiku"\}/);
+    assert.match(classifier.calls[0].request.messages[0].content[0].text, /Tool: "subagent"\nArguments: \{"prompt":"rewrite the gate","model":"haiku"\}/);
   });
 });
 
