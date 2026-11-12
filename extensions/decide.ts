@@ -68,7 +68,10 @@ export function droppedInAuto(rule: Rule, mode: Mode): boolean {
   if (mode !== "auto" || rule.tool !== "Bash") return false;
   if (rule.pattern === undefined) return true;
   if (!rule.pattern.includes("*")) return false;
-  return CODE_RUNNERS.has(basename(rule.pattern.split(/\s+/)[0] ?? ""));
+  // The `:*` suffix is the prefix wildcard, so `node:*` names `node`, not a wildcard word.
+  const first = (rule.pattern.split(/\s+/)[0] ?? "").replace(/:\*$/, "");
+  if (first.includes("*")) return true;
+  return CODE_RUNNERS.has(basename(first));
 }
 
 function allowRulesInMode(rules: readonly Rule[], mode: Mode): readonly Rule[] {

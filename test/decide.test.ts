@@ -967,6 +967,7 @@ test("auto mode keeps the acceptEdits allows and asks", () => {
 });
 
 test("auto mode ignores wildcard code runner allow and session rules but keeps exact ones", () => {
+  // The `:*` prefix form, a leading-wildcard word and a bare rule all name a runner in auto.
   const wildcard = { allow: rules("Bash(node --test:*)") };
   verdict("bash", "allow", { command: "node --test test/" }, env("acceptEdits", wildcard));
   verdict("bash", "ask", { command: "node --test test/" }, env("auto", wildcard));
@@ -981,5 +982,13 @@ test("auto mode ignores wildcard code runner allow and session rules but keeps e
   assert.equal(droppedInAuto(rules("Bash")[0], "auto"), true);
   assert.equal(droppedInAuto(rules("Bash(./gradlew *)")[0], "auto"), true);
   assert.equal(droppedInAuto(rules("Bash(node --test:*)")[0], "acceptEdits"), false);
-  assert.equal(droppedInAuto(rules("Bash(git push:*)")[0], "auto"), false);
+  for (const text of ["Bash(node:*)", "Bash(npm:*)", "Bash(python:*)", "Bash(./gradlew:*)", "Bash(*)", "Bash(* --version)"]) {
+    assert.equal(droppedInAuto(rules(text)[0], "auto"), true, text);
+  }
+  for (const text of ["Bash(node --version)", "Bash(git status:*)", "Bash(git push:*)"]) {
+    assert.equal(droppedInAuto(rules(text)[0], "auto"), false, text);
+  }
+  verdict("bash", "ask", { command: "node --version" }, env("auto", { allow: rules("Bash(*)", "Bash(node:*)", "Bash(* --version)") }));
+  verdict("bash", "allow", { command: "node --version" }, env("acceptEdits", { allow: rules("Bash(node:*)") }));
+  verdict("bash", "allow", { command: "node --version" }, env("auto", { allow: rules("Bash(node --version)") }));
 });

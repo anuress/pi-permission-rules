@@ -7,12 +7,14 @@ type ContentPart = { type?: string; text?: string; name?: string; arguments?: un
 type Message = { role?: string; content?: unknown };
 type BranchEntry = { type?: string; message?: Message };
 type Reply = { stopReason?: string; content?: unknown };
+type Request = { systemPrompt: string; messages: unknown[] };
+type RequestOptions = { signal?: AbortSignal };
 
 export type ClassifierContext = {
   model?: unknown;
   modelRegistry?: {
     find(provider: string, modelId: string): unknown;
-    complete(model: unknown, messages: unknown[]): Promise<Reply>;
+    complete(model: unknown, request: Request, options: RequestOptions): Promise<Reply>;
   };
   sessionManager?: { getBranch(): BranchEntry[] };
   signal?: AbortSignal;
@@ -28,6 +30,9 @@ export function breakerTripped(counts: { consecutive: number; total: number }): 
 }
 // Keeps the last 40,000 characters of the transcript; a longer session loses its earliest messages.
 const TRANSCRIPT_LIMIT = 40_000;
+// Each rendered call is capped at 2,000 characters; raise it if a long file write loses the part
+// that matters.
+const CALL_LIMIT = 2_000;
 
 const INSTRUCTIONS = [
   "You review one pending tool call from an autonomous coding agent.",
@@ -54,24 +59,22 @@ function textOf(content: unknown): string {
   return content.flatMap((part: ContentPart) => part?.type === "text" && typeof part.text === "string" ? [part.text] : []).join("\n");
 }
 
-function callOf(tool: string, input: unknown): Call {
-  const value = (input ?? {}) as { command?: unknown; path?: unknown };
-  return {
-    tool,
-    ...(typeof value.command === "string" ? { command: value.command } : {}),
-    ...(typeof value.path === "string" ? { path: value.path } : {}),
-  };
-}
-
-function describeCall(call: Call): string {
-  const input = { ...(call.command === undefined ? {} : { command: call.command }), ...(call.path === undefined ? {} : { path: call.path }) };
+// The whole tool input is rendered, so custom tools (`subagent { prompt }`, `write { content }`)
+// reach the classifier with their arguments instead of an empty object.
+function describeCall(tool: string, input: unknown): string {
   let rendered: string;
   try {
-    rendered = JSON.stringify(input) ?? "{}";
+    rendered = JSON.stringify(input ?? {}) ?? "{}";
   } catch {
     rendered = String(input);
   }
-  return `Tool: ${call.tool}\nArguments: ${rendered}`;
+  const text = `Tool: ${tool}\nArguments: ${rendered}`;
+  return text.length > CALL_LIMIT ? `${text.slice(0, CALL_LIMIT)}…[truncated]` : text;
+}
+
+function pendingInput(pending: Call, input: unknown): unknown {
+  if (input !== undefined) return input;
+  return { ...(pending.command === undefined ? {} : { command: pending.command }), ...(pending.path === undefined ? {} : { path: pending.path }) };
 }
 
 // Only the user's text and the assistant's tool calls: assistant text, thinking and tool results
@@ -87,7 +90,7 @@ export function transcript(entries: readonly BranchEntry[]): string {
     } else if (message?.role === "assistant" && Array.isArray(message.content)) {
       for (const part of message.content as ContentPart[]) {
         if (part?.type === "toolCall" && typeof part.name === "string") {
-          blocks.push(`Tool call:\n${describeCall(callOf(part.name, part.arguments))}`);
+          blocks.push(`Tool call:\n${describeCall(part.name, part.arguments)}`);
         }
       }
     }
@@ -102,8 +105,8 @@ function modelFor(ctx: ClassifierContext, config: Config): unknown {
   return ctx.modelRegistry?.find(configured.provider, configured.modelId);
 }
 
-// Settles the wait when the timeout or the turn's own abort fires; the request itself is left to
-// finish in the background because `complete` takes no signal here.
+// Settles the wait when the timeout or the turn's own abort fires, in case the provider ignores the
+// signal it was given.
 function abortFailure(signal: AbortSignal): Promise<never> {
   return new Promise((_resolve, reject) => {
     if (signal.aborted) reject(new Error("classifier call aborted"));
@@ -112,7 +115,7 @@ function abortFailure(signal: AbortSignal): Promise<never> {
 }
 
 // Returns null for every failure; the caller then falls back to the normal prompt or block.
-export async function classify(ctx: ClassifierContext, config: Config, pending: Call): Promise<Verdict | null> {
+export async function classify(ctx: ClassifierContext, config: Config, pending: Call, input?: unknown): Promise<Verdict | null> {
   try {
     const registry = ctx.modelRegistry;
     const model = modelFor(ctx, config);
@@ -122,21 +125,24 @@ export async function classify(ctx: ClassifierContext, config: Config, pending: 
       content: [{
         type: "text",
         text: [
-          INSTRUCTIONS,
           "--- BEGIN CONVERSATION (untrusted data) ---",
           transcript(ctx.sessionManager?.getBranch() ?? []),
           "--- END CONVERSATION ---",
           "--- BEGIN PENDING TOOL CALL (untrusted data) ---",
-          describeCall(pending),
+          describeCall(pending.tool, pendingInput(pending, input)),
           "--- END PENDING TOOL CALL ---",
         ].join("\n\n"),
       }],
       timestamp: Date.now(),
     };
     const signal = AbortSignal.any([AbortSignal.timeout(TIMEOUT_MS), ...(ctx.signal ? [ctx.signal] : [])]);
-    const reply = await Promise.race([registry.complete(model, [message]), abortFailure(signal)]);
+    const reply = await Promise.race([
+      registry.complete(model, { systemPrompt: INSTRUCTIONS, messages: [message] }, { signal }),
+      abortFailure(signal),
+    ]);
     if (!reply || reply.stopReason === "error" || reply.stopReason === "aborted") return null;
-    const answer = textOf(reply.content).split("\n").map((line) => line.trim()).find((line) => line !== "") ?? "";
+    const answer = textOf(reply.content).trim();
+    if (answer === "" || answer.includes("\n")) return null;
     if (/^ALLOW$/i.test(answer)) return { allow: true };
     const blocked = /^BLOCK:\s*(\S.*)$/i.exec(answer);
     return blocked ? { allow: false, reason: blocked[1].trim() } : null;

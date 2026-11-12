@@ -113,12 +113,15 @@ export default function (pi: ExtensionAPI): void {
 
       const unattended = isUnattended(state.config.unattended, ctx.hasUI, processEnv);
       const label = decision.flags[0]?.label ?? call.tool;
-      if (env.mode === "auto") {
+      // The built-in .git and permission-file protections exist to stop a model from approving an
+      // edit to the agent's own gate, so they never reach the classifier.
+      const builtIn = decision.flags.some((flag) => flag.rule.startsWith("built-in "));
+      if (env.mode === "auto" && !builtIn) {
         const blocks = state.auto ??= { consecutive: 0, total: 0 };
         if (breakerTripped(blocks)) {
           if (unattended) return { block: true, reason: breakerReason(label) };
         } else {
-          const verdict = await classify(ctx, state.config, call);
+          const verdict = await classify(ctx, state.config, call, input);
           if (verdict?.allow) {
             blocks.consecutive = 0;
             return undefined;

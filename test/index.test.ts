@@ -9,8 +9,9 @@ import { keyFilename } from "../extensions/project.ts";
 
 type Handler = (...args: any[]) => unknown;
 type FakeReply = { stopReason?: string; content?: { type: string; text?: string }[] };
+type FakeRequest = { systemPrompt: string; messages: { content: { text: string }[] }[] };
 type FakeClassifier = {
-  calls: { model: unknown; messages: { content: { text: string }[] }[] }[];
+  calls: { model: unknown; request: FakeRequest; options: { signal?: AbortSignal } }[];
   next: (FakeReply | Error | null)[];
   found: string[];
   models: Map<string, unknown>;
@@ -70,8 +71,8 @@ function setup(): { root: string; agent: string; handlers: Map<string, Handler>;
         classifier.found.push(`${provider}/${modelId}`);
         return classifier.models.get(`${provider}/${modelId}`);
       },
-      async complete(model: unknown, messages: { content: { text: string }[] }[]) {
-        classifier.calls.push({ model, messages });
+      async complete(model: unknown, request: FakeRequest, options: { signal?: AbortSignal }) {
+        classifier.calls.push({ model, request, options });
         const next = classifier.next.shift();
         if (next instanceof Error) throw next;
         return next ?? classifier.reply;
@@ -402,12 +403,16 @@ test("auto mode sends only user text and tool calls to the classifier", async ()
     ];
     await handlers.get("session_start")!({}, ctx);
     assert.equal(await handlers.get("tool_call")!({ toolName: "bash", input: { command: "npm test" } }, ctx), undefined);
-    const text = classifier.calls[0].messages[0].content[0].text;
+    const text = classifier.calls[0].request.messages[0].content[0].text;
+    assert.equal(classifier.calls[0].request.messages.length, 1);
+    assert.equal(classifier.calls[0].request.messages[0].content.length, 1);
+    assert.match(classifier.calls[0].request.systemPrompt, /only the user's messages and the agent's earlier tool calls/);
+    assert.ok(classifier.calls[0].options.signal instanceof AbortSignal);
     assert.match(text, /please run the tests/);
     assert.match(text, /Tool: bash\nArguments: \{"command":"ls"\}/);
     assert.match(text, /PENDING TOOL CALL[\s\S]*\{"command":"npm test"\}/);
     assert.doesNotMatch(text, /assistant prose|private thinking|tool output|ignored entry/);
-    assert.match(text, /only the user's messages and the agent's earlier tool calls/);
+    assert.match(text, /^--- BEGIN CONVERSATION \(untrusted data\) ---/);
   });
 });
 
@@ -438,6 +443,40 @@ test("classifier failures fall back to the normal prompt when attended and the n
     ui.answers.push("Yes");
     assert.equal(await handlers.get("tool_call")!({ toolName: "bash", input: { command: "git push" } }, ctx), undefined);
     assert.equal(ui.selectCalls.length, 1);
+  });
+});
+
+test("auto mode sends a custom tool's whole arguments to the classifier", async () => {
+  await withEnv({ PI_PERMISSIONS_MODE: "auto", NAKAMA_AGENT: "worker" }, async () => {
+    const { agent, handlers, ctx, classifier } = setup();
+    mkdirSync(agent, { recursive: true });
+    writeFileSync(join(agent, "permissions.json"), JSON.stringify({ permissions: { ask: ["subagent"] } }));
+    await handlers.get("session_start")!({}, ctx);
+    assert.equal(await handlers.get("tool_call")!({ toolName: "subagent", input: { prompt: "rewrite the gate", model: "haiku" } }, ctx), undefined);
+    assert.match(classifier.calls[0].request.messages[0].content[0].text, /Tool: subagent\nArguments: \{"prompt":"rewrite the gate","model":"haiku"\}/);
+  });
+});
+
+test("auto mode never sends a built-in protection ask to the classifier", async () => {
+  await withEnv({ PI_PERMISSIONS_MODE: "auto" }, async () => {
+    const { root, agent, handlers, ctx, classifier, ui } = setup();
+    await handlers.get("session_start")!({}, ctx);
+    ui.answers.push("Yes", "Yes");
+    assert.equal(await handlers.get("tool_call")!({ toolName: "write", input: { path: join(agent, "permissions.json") } }, ctx), undefined);
+    assert.equal(await handlers.get("tool_call")!({ toolName: "write", input: { path: join(root, ".git", "config") } }, ctx), undefined);
+    assert.equal(ui.selectCalls.length, 2);
+    assert.equal(classifier.calls.length, 0);
+  });
+  await withEnv({ PI_PERMISSIONS_MODE: "auto", NAKAMA_AGENT: "worker" }, async () => {
+    const { agent, handlers, ctx, classifier } = setup();
+    await handlers.get("session_start")!({}, ctx);
+    for (let index = 0; index < 4; index++) {
+      const result = await handlers.get("tool_call")!({ toolName: "write", input: { path: join(agent, "permissions.json") } }, ctx) as { block?: boolean; reason?: string };
+      assert.equal(result.block, true);
+      assert.match(result.reason ?? "", /built-in permission file protection/);
+      assert.doesNotMatch(result.reason ?? "", /auto mode stopped/);
+    }
+    assert.equal(classifier.calls.length, 0);
   });
 });
 
