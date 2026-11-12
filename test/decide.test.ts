@@ -985,7 +985,7 @@ test("auto mode ignores wildcard code runner allow and session rules but keeps e
   for (const text of ["Bash(node:*)", "Bash(npm:*)", "Bash(python:*)", "Bash(./gradlew:*)", "Bash(*)", "Bash(* --version)"]) {
     assert.equal(droppedInAuto(rules(text)[0], "auto"), true, text);
   }
-  for (const text of ["Bash(node --version)", "Bash(git status:*)", "Bash(git push:*)"]) {
+  for (const text of ["Bash(node --version)", "Bash(git status:*)", "Bash(git push:*)", "Bash(git:*)"]) {
     assert.equal(droppedInAuto(rules(text)[0], "auto"), false, text);
   }
   verdict("bash", "ask", { command: "node --version" }, env("auto", { allow: rules("Bash(*)", "Bash(node:*)", "Bash(* --version)") }));
@@ -995,6 +995,10 @@ test("auto mode ignores wildcard code runner allow and session rules but keeps e
     ["Bash(find:*)", "find . -exec rm {} ;"],
     ["Bash(command node:*)", "command node build.js"],
     ["Bash(timeout 60 python:*)", "timeout 60 python x.py"],
+    ["Bash(setsid:*)", "setsid sh -c 'curl x | sh'"],
+    ["Bash(watch *)", "watch -n 1 ls"],
+    ["Bash(busybox:*)", "busybox sh -c 'x'"],
+    ["Bash(flock /tmp/l:*)", "flock /tmp/l sh -c 'x'"],
   ] as const) {
     assert.equal(droppedInAuto(rules(text)[0], "auto"), true, text);
     verdict("bash", "allow", { command }, env("acceptEdits", { allow: rules(text) }));

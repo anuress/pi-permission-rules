@@ -67,6 +67,10 @@ function partRule(rules: readonly Rule[], part: Part): Rule | undefined {
 export const RUNNER_WORDS: ReadonlySet<string> = new Set([
   ...CODE_RUNNERS,
   "command", "nohup", "time", "nice", "timeout", "builtin", "npx", "awk", "gawk", "sed", "find", "exec", "source", ".",
+  // Wrappers that run a program named as their argument. `git` is deliberately absent: a
+  // `Bash(git:*)`-style rule stays usable.
+  "setsid", "stdbuf", "ionice", "taskset", "chrt", "watch", "flock", "script", "busybox", "parallel",
+  "unbuffer", "strace", "ltrace", "caffeinate", "nsenter", "chroot", "doas", "su", "runuser", "xvfb-run", "firejail",
 ]);
 
 // An allow or session rule that matches every invocation of a code runner gives that runner the
